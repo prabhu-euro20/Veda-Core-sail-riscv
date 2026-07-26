@@ -104,6 +104,29 @@ extensions {
     }
   }
 
+  // Veda-Core custom extension (not part of upstream sail-riscv).
+  // Milestone V-A: capability struct, Capability Register File, Object
+  // Descriptor Table, Object-Bind, OCL.D/OCS.D. See
+  // rva23-core/veda-core/FORMAL_VERIFICATION_PLAN.md.
+  Veda {
+    requires core
+
+    Veda_types {
+      before sys
+      files extensions/Veda/veda_types.sail
+    }
+    Veda_insts {
+      requires exceptions, sys, I, Veda_types
+
+      files
+        extensions/Veda/veda_regs.sail,
+        extensions/Veda/veda_bind_insts.sail,
+        extensions/Veda/veda_ocl_insts.sail,
+        extensions/Veda/veda_atomic_insts.sail,
+        extensions/Veda/veda_cap_insts.sail,
+    }
+  }
+
   A {
     A_types {
       files extensions/A/aext_types.sail
@@ -567,7 +590,7 @@ mops {
 postlude {
   after extensions, mops, core
 
-  requires prelude, core, sys, exceptions, Smcntrpmf, pmp, Zicfilp_regs, Zicfilp_insts
+  requires prelude, core, sys, exceptions, Smcntrpmf, pmp, Zicfilp_regs, Zicfilp_insts, Veda_insts
 
   files
     postlude/insts_end.sail,

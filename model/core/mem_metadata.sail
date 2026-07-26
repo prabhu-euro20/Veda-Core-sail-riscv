@@ -7,12 +7,98 @@
 // =======================================================================================
 
 // The default metadata carries no information, and is implemented
-// using a unit type.
+// using a unit type -- overridden below by Veda-Core's own real,
+// out-of-band capability Tag bit (VEDA_CORE_SPEC.md's OCL.C/OCS.C
+// semantics, Milestone 7), following exactly the extension point this
+// file's own original comment already named ("specifically for an
+// extension to override with real per-location metadata").
+//
+// mem_meta is redefined from unit to bool: `false` (= default_meta) for
+// every ordinary, non-Veda memory access -- base RV64I code (model/sys/
+// mem.sail) already threads default_meta through every plain load/store
+// unconditionally, so this change is transparent to it; base ISA
+// semantics are unaffected, only the *type* default_meta now carries
+// changes, not how or when base code uses it.
+//
+// Real, bounded tag store, mirroring CHERI's own actual hardware
+// mechanism (a physically separate tag bit per capability-aligned
+// memory granule, set/checked only by capability load/store, never by
+// plain data loads/stores) -- not a per-address dictionary over the full
+// 64-bit space, which Sail has no native sparse-map primitive for and
+// which no real hardware implements unbounded either. Scoped to the same
+// real, ELF-loadable RAM region already used throughout this project
+// (`rtl/veda_core.tlv`'s own ELFMEM_BASE=0x8000_0000/ELFMEM_SIZE=0x80000),
+// an honest, stated scope boundary matching the identical discipline
+// already used for the RTL ODT's own 256-entry (not 8.4M-entry) scope
+// (`rtl/MILESTONE_PLAN.md`: "real silicon-area consciousness... explicitly
+// deferred, later work"). 16-byte (128-bit) granules, matching the
+// capability's own real width (VEDA_CORE_SPEC.md Section 2).
+type mem_meta = bool
 
-type mem_meta = unit
+let default_meta : mem_meta = false
 
-let default_meta : mem_meta = ()
+let veda_tagstore_base   : bits(64) = 0x0000000080000000
+// A real Kind-Int constant (matching prelude.sail's own `type
+// max_mem_access : Int = 4096` idiom, not a plain `let`-bound `int`) --
+// needed so the type-checker can actually resolve the vector-index bounds
+// proof below at compile time; a plain-int `let` binding doesn't carry
+// that compile-time-constant guarantee, a real "Failed to prove
+// constraint" build error with the `let` form, confirmed by attempting it
+// first.
+type veda_tagstore_granules : Int = 32768  // 0x80000 bytes / 16 bytes per granule
+// Same real idiom already used in this codebase (core/xlen.sail: `let
+// xlen = sizeof(xlen)`) for pulling a Kind-Int constant into value-level
+// int expressions -- a bare type-level identifier isn't usable directly
+// in value position (a real "Identifier ... is unbound" build error,
+// confirmed by attempting it first).
+let veda_tagstore_granules = sizeof(veda_tagstore_granules)
 
-function __WriteRAM_Meta(_addr : physaddrbits, _width : mem_access_width, _meta : mem_meta) -> unit = ()
+register veda_tag_store : vector(veda_tagstore_granules, bool) = vector_init(false)
 
-function __ReadRAM_Meta(_addr : physaddrbits, _width : mem_access_width) -> mem_meta = default_meta
+// Out-of-bounds (outside the modeled RAM region) always reads/writes as
+// untagged -- the honest, safe default for an address this tag store was
+// never scoped to cover, not a silent assumption of "tagged."
+function veda_tagstore_index(addr : physaddrbits) -> option(int) = {
+  let addr64 : bits(64) = zero_extend(addr);
+  if unsigned(addr64) < unsigned(veda_tagstore_base) then None()
+  else {
+    // Stay in bits(64) arithmetic (subtract, then shift right by 4 = /16,
+    // since 16 is a power of two -- the same real, natural technique real
+    // hardware would use for a fixed granule size) rather than plain-int
+    // division, which Sail's dependent-type checker cannot statically
+    // prove non-negative/well-founded here (a real "Could not resolve
+    // quantifiers" build error, not assumed -- confirmed by actually
+    // attempting the division form first).
+    let byte_off : bits(64) = addr64 - veda_tagstore_base;
+    let granule : int = unsigned(byte_off >> 4);
+    if granule >= veda_tagstore_granules then None() else Some(granule)
+  }
+}
+
+function __WriteRAM_Meta(addr : physaddrbits, _width : mem_access_width, meta : mem_meta) -> unit = {
+  match veda_tagstore_index(addr) {
+    Some(idx) => {
+      // veda_tagstore_index's own `if granule >= veda_tagstore_granules
+      // then None()` check already guarantees this at the call site, but
+      // that fact doesn't survive across the Option boundary to Sail's
+      // static type-checker (a real "Failed to prove constraint" build
+      // error, confirmed by actually attempting the indexing without this
+      // assert first) -- re-asserted here, at the one real point it's
+      // needed, rather than trying to thread a refined int type through
+      // the Option itself.
+      assert(idx >= 0 & idx < veda_tagstore_granules);
+      veda_tag_store[idx] = meta
+    },
+    None() => (),
+  }
+}
+
+function __ReadRAM_Meta(addr : physaddrbits, _width : mem_access_width) -> mem_meta = {
+  match veda_tagstore_index(addr) {
+    Some(idx) => {
+      assert(idx >= 0 & idx < veda_tagstore_granules);
+      veda_tag_store[idx]
+    },
+    None() => default_meta,
+  }
+}
