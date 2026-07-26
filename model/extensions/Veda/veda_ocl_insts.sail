@@ -344,6 +344,12 @@ function clause execute VEDA_ODT_POPULATE(rs2, rs1, rd) = {
       Length     = descriptor[31..16],
       Perms      = descriptor[15..0],
       generation = new_generation,
+      // Milestone 12 (in progress): a (re)populated slot always resets
+      // to unowned -- ownership is claimed by the first real Bind, not
+      // granted at populate time. This field is not yet consumed by any
+      // check (Bind/Rebind enforcement is the next real step of this
+      // milestone) -- stated here rather than left silently undone.
+      owner_hart = VEDA_OWNER_UNOWNED,
     });
     X(rd) = zeros();
     RETIRE_SUCCESS
@@ -361,6 +367,7 @@ function clause execute VEDA_ODT_DESTROY(rs1, rd) = {
       Length     = old_entry.Length,
       Perms      = old_entry.Perms,
       generation = old_entry.generation + 1,
+      owner_hart = VEDA_OWNER_UNOWNED,
     });
     X(rd) = zeros();
     RETIRE_SUCCESS
