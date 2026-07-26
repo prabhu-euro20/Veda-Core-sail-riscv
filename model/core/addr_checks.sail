@@ -15,11 +15,28 @@ type ext_fetch_addr_error = unit
 // pc:       the PC for the current granule
 //
 // returns:  an optional fetch error.
-function ext_fetch_check_pc(_start_pc : xlenbits, _pc : xlenbits) -> option(ext_fetch_addr_error) =
-  None()
+//
+// Veda-Core Milestone 14 (rva23-core/veda-core/PCC_COMPARTMENT_DESIGN.md):
+// the real *bodies* of these two functions now live in
+// postlude/step_ext.sail instead of here, because they need to
+// reference Veda's own `veda_pcc_base`/`veda_pcc_length` registers --
+// confirmed via a real, direct build failure ("Identifier
+// veda_pcc_length is unbound") that `core` is elaborated strictly
+// before `Veda_insts` in riscv.sail_project's own module graph (`Veda {
+// requires core }`, not the reverse), so a `core`-resident function body
+// can never see a Veda-defined register, no matter where in the file
+// it's textually written. `postlude` already `requires ... Veda_insts`
+// (confirmed by reading riscv.sail_project directly -- the same real
+// reason `ext_reset`'s own Veda-referencing body already lives in
+// postlude/step_ext.sail, not here). Only the forward `val` declarations
+// stay in `core` (matching every other hook in this file, and not
+// themselves referencing anything Veda-specific -- just the ordinary,
+// already-core-visible `xlenbits`/`option`/`ext_fetch_addr_error`
+// types), so `postlude/fetch.sail`'s own calls to these two functions
+// (compiled as part of `core`-and-earlier-visible code) still resolve.
+val ext_fetch_check_pc : (xlenbits, xlenbits) -> option(ext_fetch_addr_error)
 
-function ext_handle_fetch_check_error(_err : ext_fetch_addr_error) -> unit =
-  ()
+val ext_handle_fetch_check_error : ext_fetch_addr_error -> unit
 
 // default control address checks
 

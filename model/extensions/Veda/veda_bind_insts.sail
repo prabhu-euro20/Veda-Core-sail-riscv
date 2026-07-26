@@ -54,6 +54,14 @@ function veda_xtval(cap_idx : bits(4), cause : bits(5)) -> xlenbits = {
 }
 
 function veda_trap(cap_idx : vcapidx, cause : bits(5)) -> ExecutionResult = {
+  // Milestone 14 (PCC_COMPARTMENT_DESIGN.md): every real Veda-Core
+  // hard-trap must save the live compartment bounds and reset to
+  // unbounded before the trap actually fires -- real CHERI's own
+  // "Exception Code Capability" requirement (CHERI ISA spec §3.4.7): a
+  // trap handler must run in a trusted, unconstrained context, not be
+  // blocked by whatever OCInvoke-narrowed bounds happened to be active
+  // when the violation occurred.
+  veda_pcc_save_and_reset();
   let Vcapidx(idx) = cap_idx;
   trap(make_sync_exception(E_Extension(()), veda_xtval(idx, cause)))
 }

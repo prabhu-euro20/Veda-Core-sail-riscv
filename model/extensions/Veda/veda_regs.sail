@@ -41,6 +41,80 @@ register crTags : bits(16)
 register veda_oda : capability
 register veda_oda_tag : bool
 
+// Milestone 14 (PCC_COMPARTMENT_DESIGN.md): the currently-active
+// `OCInvoke`-entered compartment's own bounds, and their saved copy
+// across a trap -- Base(32)/Length(16), matching the ODT entry's own
+// field widths (veda_types.sail's odt_entry), not independently chosen.
+// `VEDA_PCC_UNBOUNDED` (all-ones Length) is the "no compartment active"
+// sentinel -- real CHERI's own convention that execution starts with an
+// "almighty" root capability and only ever narrows (CHERI ISA spec
+// §2.3.12/§11.1.2, read in full for PCC_COMPARTMENT_DESIGN.md). Reset
+// value is unbounded, so no code that never calls `OCInvoke` is ever
+// constrained by this feature at all.
+let VEDA_PCC_UNBOUNDED : bits(16) = 0xFFFF
+register veda_pcc_base : bits(32)
+register veda_pcc_length : bits(16)
+// Milestone 14: the direct structural twin of `mepc`, but for the
+// compartment bounds instead of the plain PC -- real CHERI's own
+// "Exception Program Counter Capability" (CHERI ISA spec §3.4.7:
+// "CHERI architectures must save and restore the full PCC when handling
+// exceptions"). Restoration across a real `mret` is an explicit
+// software step (via the CSR clauses below), not automatic hardware --
+// PCC_COMPARTMENT_DESIGN.md §5a's own real finding that `xret_callback`
+// is declared `pure` and cannot host this side effect, resolved by
+// making this consistent with `mepc`'s own already-explicit
+// advance-before-`mret` convention (Milestone 9) rather than forcing an
+// automatic mechanism where none is cleanly available.
+register veda_mepcc_base : bits(32)
+register veda_mepcc_length : bits(16)
+
+// Milestone 14: shared by both real hard-trap paths that narrow PCC
+// away from a live compartment -- `veda_trap()` (every ordinary
+// Veda-Core "use"-family violation) and the new PCC-bounds-violation
+// path (veda_pcc.sail, routed through `handle_exception` directly since
+// it fires outside the normal per-instruction execute dispatch). Saves
+// the live compartment bounds so software can restore them later, then
+// resets to unbounded so the trap handler itself runs in a trusted,
+// unconstrained context -- real CHERI's own "Exception Code Capability"
+// requirement (CHERI ISA spec §3.4.7).
+function veda_pcc_save_and_reset() -> unit = {
+  veda_mepcc_base = veda_pcc_base;
+  veda_mepcc_length = veda_pcc_length;
+  veda_pcc_base = zeros();
+  veda_pcc_length = VEDA_PCC_UNBOUNDED;
+}
+
+// Milestone 14: four new CSRs in the real, standard RISC-V "Machine-
+// level Custom read/write" address range (riscv-spec.pdf Table 91,
+// "Allocation of RISC-V CSR address ranges," p.664: 0x7C0-0x7FF) --
+// verified against the real spec, not invented, the same real range
+// convention already trusted once for `mtvec`/`mepc`/`mcause`/`mtval`
+// sitting in the adjacent *standard* M-mode range (0x300-0x3FF).
+// Exposed via the real, unmodified, already-working base-ISA CSRRW/
+// CSRRS (no new instruction), following the exact same real
+// `scattered function`/`scattered mapping` clause mechanism this
+// codebase's own core/sys_regs.sail already uses for mtvec/mcause/etc.
+// (read directly before writing this, not assumed).
+mapping clause csr_name_map = 0x7C0 <-> "veda_pcc_base"
+mapping clause csr_name_map = 0x7C1 <-> "veda_pcc_length"
+mapping clause csr_name_map = 0x7C2 <-> "veda_mepcc_base"
+mapping clause csr_name_map = 0x7C3 <-> "veda_mepcc_length"
+
+function clause is_CSR_accessible(0x7C0, _, _) = currentlyEnabled(Ext_Veda)
+function clause is_CSR_accessible(0x7C1, _, _) = currentlyEnabled(Ext_Veda)
+function clause is_CSR_accessible(0x7C2, _, _) = currentlyEnabled(Ext_Veda)
+function clause is_CSR_accessible(0x7C3, _, _) = currentlyEnabled(Ext_Veda)
+
+function clause read_CSR(0x7C0) = zero_extend(veda_pcc_base)
+function clause read_CSR(0x7C1) = zero_extend(veda_pcc_length)
+function clause read_CSR(0x7C2) = zero_extend(veda_mepcc_base)
+function clause read_CSR(0x7C3) = zero_extend(veda_mepcc_length)
+
+function clause write_CSR(0x7C0, value) = { veda_pcc_base = value[31..0]; Ok(zero_extend(veda_pcc_base)) }
+function clause write_CSR(0x7C1, value) = { veda_pcc_length = value[15..0]; Ok(zero_extend(veda_pcc_length)) }
+function clause write_CSR(0x7C2, value) = { veda_mepcc_base = value[31..0]; Ok(zero_extend(veda_mepcc_base)) }
+function clause write_CSR(0x7C3, value) = { veda_mepcc_length = value[15..0]; Ok(zero_extend(veda_mepcc_length)) }
+
 function rC(Vcapno(r) : vcapno) -> capability = {
   match r {
     0  => cr0,

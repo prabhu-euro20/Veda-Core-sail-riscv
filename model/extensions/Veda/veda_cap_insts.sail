@@ -350,23 +350,26 @@ mapping clause encdec = VEDA_OCINVOKE(rs2, rs1)
 // ordinary capability register file, index 31, nothing more).
 let VEDA_IDC_INDEX : vcapno = Vcapno(15)
 
-// Deliberate scope deviation from real CHERI, stated plainly: CHERI's
-// own CInvoke also installs the unsealed CODE capability into PCC (a
-// full capability struct, later inspectable via CGetPCC, and consumed
-// by every subsequent instruction fetch for bounds/permission
-// enforcement). Veda-Core has no PCC-equivalent register and, critically,
-// no instruction-fetch-time capability enforcement at all (fetch remains
-// plain RV64I, unconstrained by any capability) -- confirmed unchanged
-// throughout this project, including RTL Milestone 9's own real trap
-// infrastructure, which only ever gates dereference/domain-transition
-// instructions, never fetch itself. Storing a full PCC struct now would
-// therefore be genuinely dead state, with zero real consumers -- so this
-// pass only extracts the unsealed code capability's own resolved target
-// address (Base + Offset, the same real CGetAddr semantics already
-// established) and redirects PC to it directly, achieving CHERI's own
-// real "atomic unseal-and-jump" property literally (a true hardware
-// jump, not a two-instruction unseal-then-JALR sequence) without
-// inventing a PCC-storage mechanism nothing yet reads.
+// Milestone 10's own original scope deviation from real CHERI is
+// PARTIALLY closed as of Milestone 14
+// (rva23-core/veda-core/PCC_COMPARTMENT_DESIGN.md): CHERI's own CInvoke
+// installs the unsealed CODE capability into PCC (a full capability
+// struct, later inspectable via CGetPCC, and consumed by every
+// subsequent instruction fetch for bounds/permission enforcement).
+// Veda-Core still has no full PCC struct (Object_ID/Perms/otype/
+// Reserved are not tracked for the active compartment, only what
+// PCC_COMPARTMENT_DESIGN.md's own research found this project actually
+// needed a real consumer for: Base/Length, real fetch-time bounds
+// enforcement via core/addr_checks.sail's own overridden
+// `ext_fetch_check_pc`) -- this pass narrows `veda_pcc_base`/
+// `veda_pcc_length` to `cs1`'s own bounds on every successful
+// invocation, so code entered via `OCInvoke` genuinely cannot execute
+// (or return control) outside the region it was handed authority over,
+// the actual security property `CInvoke`/`OCInvoke` exist to provide.
+// The resolved target address (Base + Offset, the same real CGetAddr
+// semantics already established) still redirects PC directly, achieving
+// CHERI's own real "atomic unseal-and-jump" property literally (a true
+// hardware jump, not a two-instruction unseal-then-JALR sequence).
 function clause execute VEDA_OCINVOKE(rs2, rs1) = {
   let cs1idx = vcapidx_to_vcapno(rs1);
   let cs2idx = vcapidx_to_vcapno(rs2);
@@ -401,6 +404,13 @@ function clause execute VEDA_OCINVOKE(rs2, rs1) = {
     };
     wC(VEDA_IDC_INDEX, unsealed_cs2);
     wCTag(VEDA_IDC_INDEX, true);
+    // Milestone 14: narrow the live compartment to cs1's own bounds --
+    // the real security effect real CHERI's own PCC-installation
+    // achieves, applied to the Base/Length subset this project's own
+    // research found a real consumer for (PCC_COMPARTMENT_DESIGN.md §7:
+    // Perms-on-PCC deliberately deferred, no real consumer exists yet).
+    veda_pcc_base = cs1.Base;
+    veda_pcc_length = cs1.Length;
     let target : xlenbits = zero_extend(cs1.Base) + zero_extend(cs1.Offset);
     jump_to([target with 0 = bitzero])
   }
