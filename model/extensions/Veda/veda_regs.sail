@@ -177,5 +177,24 @@ function veda_test_seed_odt() -> unit = {
     Perms      = 0x0000,
     generation = zeros(),
     owner_hart = VEDA_OWNER_UNOWNED,
+  });
+  // Milestone 12 addition: a fifth seeded object, pre-claimed by a
+  // hypothetical OTHER hart (99 -- distinct from this real, single-
+  // process simulator's own real `mhartid`, config-fixed at 0). This
+  // project's own Sail test config genuinely cannot produce two real,
+  // concurrently-executing harts (a real, distinct limitation named in
+  // MILESTONE_11_RESULTS.md for an unrelated reason, S/U-mode being
+  // disabled there) -- direct ODT-state injection is the real, already-
+  // established way this project proves policy-logic correctness
+  // without that (the identical real technique already used for every
+  // other seeded object above, none of which are populated via a real
+  // ODT-Populate instruction either).
+  odt_write(to_bits(23, 5), struct {
+    valid      = true,
+    Base       = 0x80010400,
+    Length     = 0x0010,
+    Perms      = 0x000C,
+    generation = zeros(),
+    owner_hart = 0x63, // 99 decimal -- a real, distinct, non-zero "other hart"
   })
 }

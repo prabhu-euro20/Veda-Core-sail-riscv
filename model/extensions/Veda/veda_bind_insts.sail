@@ -33,6 +33,14 @@ let VEDA_CAUSE_PERM_NMC_COMPUTE_VIOLATION : bits(5) = 0b11111 // 0x1f
 let VEDA_CAUSE_TYPE_VIOLATION         : bits(5) = 0b00100 // 0x04
 let VEDA_CAUSE_PERM_EXECUTE_VIOLATION : bits(5) = 0b10001 // 0x11
 let VEDA_CAUSE_PERM_INVOKE_VIOLATION  : bits(5) = 0b11001 // 0x19
+// Milestone 12 (VEDA_CORE_SPEC.md §4.1, real, previously-named gap:
+// "an owner-hart field in the ODT entry, checked at Bind/Rebind time...
+// real, identified future work"): the next reserved cause slot
+// (0x06-0x07 were both listed "reserved" in Section 3's own table, no
+// prior instruction ever claimed either). Veda-Core-specific -- no
+// CHERI equivalent, since CHERI has no concept of an object being
+// "claimed" by one hart's own Object-Bind at all.
+let VEDA_CAUSE_OWNER_VIOLATION : bits(5) = 0b00110 // 0x06
 
 function veda_xtval(cap_idx : bits(4), cause : bits(5)) -> xlenbits = {
   // Deliberately avoids the two-argument `zero_extend(bits, width)` form --
@@ -77,6 +85,26 @@ function clause execute VEDA_BINDINST(mode_bits, rs1, rd) = {
   let object_id = X(rs1)[22..0];
   let rdno = vcapidx_to_vcapno(rd);
   let e = odt_lookup(object_id);
+  // Milestone 12 (VEDA_CORE_SPEC.md §4.1): an object with no live owner
+  // yet, or one this same hart already owns, is fair game -- claiming it
+  // (or re-claiming it, idempotently) is exactly what a successful
+  // Bind/Rebind does below. `mhartid` is a real, already-existing
+  // architectural register (core/sys_regs.sail) -- not a new one
+  // invented for this purpose -- truncated to the same 8-bit width
+  // `owner_hart` itself uses (veda_types.sail's own real, bounded
+  // 256-hart design ceiling).
+  let owner_ok : bool = (e.owner_hart == VEDA_OWNER_UNOWNED) | (e.owner_hart == mhartid[7..0]);
+  // The real claim, shared by both the Bind and Rebind success paths
+  // below: every field except owner_hart carries over from the ODT's
+  // own existing entry unchanged -- this is a claim, not a repopulate.
+  let claimed_entry : odt_entry = struct {
+    valid      = e.valid,
+    Base       = e.Base,
+    Length     = e.Length,
+    Perms      = e.Perms,
+    generation = e.generation,
+    owner_hart = mhartid[7..0],
+  };
 
   match mode {
     VEDA_BIND_RESERVED => Illegal_Instruction(),
@@ -85,12 +113,17 @@ function clause execute VEDA_BINDINST(mode_bits, rs1, rd) = {
       // VEDA_CORE_SPEC.md Section 4: Rebind on a currently-sealed capability
       // register soft-fails (Tag cleared, ODT refresh skipped) rather than
       // trapping -- it "manipulates" the register, it doesn't "use" the
-      // object, matching Section 1's manipulate-vs-use split.
+      // object, matching Section 1's manipulate-vs-use split. The same
+      // "manipulate, not use" reasoning extends to a wrong-owner ODT
+      // entry (Milestone 12): Rebind never traps for ANY failure reason,
+      // owner mismatch included -- it joins the object-not-found and
+      // already-sealed cases in the same uniform soft-fail branch below.
       let cur = C(rdno);
       if isSealedCap(cur) then {
         wCTag(rdno, false);
         RETIRE_SUCCESS
-      } else if e.valid then {
+      } else if e.valid & owner_ok then {
+        odt_write(object_id, claimed_entry);
         wC(rdno, struct {
           Object_ID = object_id,
           Base      = e.Base,
@@ -115,7 +148,8 @@ function clause execute VEDA_BINDINST(mode_bits, rs1, rd) = {
     // VEDA_BIND_RESERVED are already handled above) and branches inside
     // the body instead.
     _ => {
-      if e.valid then {
+      if e.valid & owner_ok then {
+        odt_write(object_id, claimed_entry);
         wC(rdno, struct {
           Object_ID = object_id,
           Base      = e.Base,
@@ -127,6 +161,21 @@ function clause execute VEDA_BINDINST(mode_bits, rs1, rd) = {
         });
         wCTag(rdno, true);
         RETIRE_SUCCESS
+      } else if e.valid then {
+        // A live object, owned by a DIFFERENT hart -- a real, genuine
+        // access-control violation, distinct in kind from "object not
+        // found" (that object genuinely exists; this hart simply isn't
+        // its owner). Bind-NoTrap still soft-fails here too, matching
+        // its own established convention for every other failure
+        // reason; plain Bind hard-traps, the first real consumer of
+        // cause = 0x06.
+        if mode == VEDA_BIND_NOTRAP then {
+          wC(rdno, zero_capability);
+          wCTag(rdno, false);
+          RETIRE_SUCCESS
+        } else {
+          veda_trap(rd, VEDA_CAUSE_OWNER_VIOLATION)
+        }
       } else if mode == VEDA_BIND_NOTRAP then {
         wC(rdno, zero_capability);
         wCTag(rdno, false);
