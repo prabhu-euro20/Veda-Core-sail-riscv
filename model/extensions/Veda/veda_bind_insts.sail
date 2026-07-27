@@ -112,6 +112,7 @@ function clause execute VEDA_BINDINST(mode_bits, rs1, rd) = {
     Perms      = e.Perms,
     generation = e.generation,
     owner_hart = mhartid[7..0],
+    retired    = e.retired,
   };
 
   match mode {

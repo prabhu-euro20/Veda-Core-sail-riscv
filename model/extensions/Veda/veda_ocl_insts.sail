@@ -332,27 +332,46 @@ function clause execute VEDA_ODT_POPULATE(rs2, rs1, rd) = {
     let object_id : bits(23) = X(rs1)[22..0];
     let descriptor : bits(64) = zero_extend(X(rs2));
     let old_entry = odt_lookup(object_id);
-    // A slot being repopulated while still `valid` bumps generation too
-    // (not just Destroy) -- the ODT's own real security property (a
-    // stale capability's cached generation must stop matching once its
-    // Object_ID means something else) has to hold regardless of whether
-    // software destroyed the old entry first or overwrote it directly.
-    let new_generation : bits(8) = if old_entry.valid then old_entry.generation + 1 else old_entry.generation;
-    odt_write(object_id, struct {
-      valid      = true,
-      Base       = descriptor[63..32],
-      Length     = descriptor[31..16],
-      Perms      = descriptor[15..0],
-      generation = new_generation,
-      // Milestone 12 (in progress): a (re)populated slot always resets
-      // to unowned -- ownership is claimed by the first real Bind, not
-      // granted at populate time. This field is not yet consumed by any
-      // check (Bind/Rebind enforcement is the next real step of this
-      // milestone) -- stated here rather than left silently undone.
-      owner_hart = VEDA_OWNER_UNOWNED,
-    });
-    X(rd) = zeros();
-    RETIRE_SUCCESS
+    // RTL Milestone 16 mirror (veda_types.sail's own `retired` field
+    // comment has the full real reasoning): a slot that has already
+    // exhausted its real generation counter can never be safely
+    // repopulated again -- a stale capability cached from any point
+    // after saturation would be permanently indistinguishable from a
+    // genuinely new object otherwise. Illegal_Instruction() matches
+    // this same instruction's own existing convention for its other
+    // real failure mode (privilege), just above.
+    if old_entry.retired then Illegal_Instruction()
+    else {
+      // A slot being repopulated while still `valid` bumps generation too
+      // (not just Destroy) -- the ODT's own real security property (a
+      // stale capability's cached generation must stop matching once its
+      // Object_ID means something else) has to hold regardless of whether
+      // software destroyed the old entry first or overwrote it directly.
+      // RTL Milestone 16: once already at 0xff, freeze instead of
+      // wrapping back to 0 -- `new_retired` (below) is what actually
+      // stops the slot from ever being reused once this point is
+      // reached.
+      let new_generation : bits(8) =
+        if old_entry.valid then (if old_entry.generation == 0xff then 0xff else old_entry.generation + 1)
+        else old_entry.generation;
+      let new_retired : bool = old_entry.valid & (old_entry.generation == 0xff);
+      odt_write(object_id, struct {
+        valid      = true,
+        Base       = descriptor[63..32],
+        Length     = descriptor[31..16],
+        Perms      = descriptor[15..0],
+        generation = new_generation,
+        // Milestone 12 (in progress): a (re)populated slot always resets
+        // to unowned -- ownership is claimed by the first real Bind, not
+        // granted at populate time. This field is not yet consumed by any
+        // check (Bind/Rebind enforcement is the next real step of this
+        // milestone) -- stated here rather than left silently undone.
+        owner_hart = VEDA_OWNER_UNOWNED,
+        retired    = new_retired,
+      });
+      X(rd) = zeros();
+      RETIRE_SUCCESS
+    }
   }
 }
 
@@ -361,13 +380,21 @@ function clause execute VEDA_ODT_DESTROY(rs1, rd) = {
   else {
     let object_id : bits(23) = X(rs1)[22..0];
     let old_entry = odt_lookup(object_id);
+    // RTL Milestone 16: Destroy always bumps (unlike Populate, it is not
+    // itself gated by `retired` -- destroying an already-retired slot is
+    // harmless, it just stays invalid and retired), but the same
+    // freeze-at-0xff-and-retire rule applies once the counter is
+    // exhausted.
+    let new_generation : bits(8) = if old_entry.generation == 0xff then 0xff else old_entry.generation + 1;
+    let new_retired : bool = old_entry.retired | (old_entry.generation == 0xff);
     odt_write(object_id, struct {
       valid      = false,
       Base       = old_entry.Base,
       Length     = old_entry.Length,
       Perms      = old_entry.Perms,
-      generation = old_entry.generation + 1,
+      generation = new_generation,
       owner_hart = VEDA_OWNER_UNOWNED,
+      retired    = new_retired,
     });
     X(rd) = zeros();
     RETIRE_SUCCESS

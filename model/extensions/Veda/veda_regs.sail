@@ -215,6 +215,7 @@ function veda_test_seed_odt() -> unit = {
     Perms      = 0x100C,
     generation = zeros(),
     owner_hart = VEDA_OWNER_UNOWNED,
+    retired    = false,
   });
   // Milestone V-B addition: a second seeded object, deliberately *without*
   // Permit_NMC_Compute (Perms = 0x000C, Load+Store only), so a real
@@ -227,6 +228,7 @@ function veda_test_seed_odt() -> unit = {
     Perms      = 0x000C,
     generation = zeros(),
     owner_hart = VEDA_OWNER_UNOWNED,
+    retired    = false,
   });
   // Milestone V-B addition: a third seeded object for use as a CSeal/
   // CUnseal type-authority capability -- Perms = 0x300 (Permit_Seal, bit
@@ -240,6 +242,7 @@ function veda_test_seed_odt() -> unit = {
     Perms      = 0x0300,
     generation = zeros(),
     owner_hart = VEDA_OWNER_UNOWNED,
+    retired    = false,
   });
   // Milestone V-B addition: a fourth seeded object identical to Object_ID
   // 3 except *without* Permit_Seal/Permit_Unseal, so a real negative test
@@ -251,6 +254,7 @@ function veda_test_seed_odt() -> unit = {
     Perms      = 0x0000,
     generation = zeros(),
     owner_hart = VEDA_OWNER_UNOWNED,
+    retired    = false,
   });
   // Milestone 12 addition: a fifth seeded object, pre-claimed by a
   // hypothetical OTHER hart (99 -- distinct from this real, single-
@@ -270,5 +274,6 @@ function veda_test_seed_odt() -> unit = {
     Perms      = 0x000C,
     generation = zeros(),
     owner_hart = 0x63, // 99 decimal -- a real, distinct, non-zero "other hart"
+    retired    = false,
   })
 }

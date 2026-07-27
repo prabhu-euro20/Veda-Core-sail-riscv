@@ -165,6 +165,27 @@ struct odt_entry = {
   Perms      : bits(16),
   generation : bits(8),
   owner_hart : bits(8),
+  // Mirrors RTL Milestone 16 (rtl/MILESTONE_16_RESULTS.md,
+  // veda-core/ARCHITECTURE_IMPROVEMENT_FINDINGS.md Finding 2): the
+  // 8-bit `generation` counter's own real ABA-problem wraparound,
+  // empirically reproduced (256 real Destroy operations on the same
+  // slot wrap it exactly back to a stale capability's own cached
+  // value). Simply saturating `generation` at 0xff is not sufficient by
+  // itself -- every future re-populate would then also land on 0xff,
+  // making every incarnation from that point on permanently
+  // indistinguishable rather than only periodically. `retired` closes
+  // this: once `generation` would wrap, the slot is permanently
+  // retired instead -- ODT-Populate against it becomes Illegal
+  // -Instruction() from then on. This is a deliberate divergence from
+  // CHERI-D's own real, published precedent (Wang et al., arXiv
+  // 2606.19055; SCALING_BARRIERS_RESEARCH.md Section 3/6), which
+  // accepts wraparound as a statistically-rare residual risk empirically
+  // derived from real allocator traces -- justified here specifically
+  // because Veda-Core's own stated priority is security over
+  // throughput/compatibility, and because this project now has a real,
+  // empirically demonstrated exploit on its own RTL, not merely a
+  // theoretical risk.
+  retired    : bool,
 }
 
 let empty_odt_entry : odt_entry = struct {
@@ -174,6 +195,7 @@ let empty_odt_entry : odt_entry = struct {
   Perms      = zeros(),
   generation = zeros(),
   owner_hart = VEDA_OWNER_UNOWNED,
+  retired    = false,
 }
 
 // Milestone V-B: Veda-Atomic's op-select enum (VEDA_CORE_SPEC.md Section 1)
