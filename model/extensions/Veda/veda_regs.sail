@@ -84,6 +84,20 @@ function veda_pcc_save_and_reset() -> unit = {
   veda_pcc_length = VEDA_PCC_UNBOUNDED;
 }
 
+// Milestone 18 (real, measured motivation: IMMEDIATE_LIMIT_INVESTIGATION --
+// RV64I's 12-bit immediate forces a full 6-instruction `li` per ODT-Populate
+// descriptor, and a real, dedicated benchmark showed a software-only `la`
+// -based workaround saves only ~5%, since Base still has to be shifted into
+// the descriptor's upper 32 bits regardless of how it's loaded). `veda_attr`
+// holds Length(bits 31..16)/Perms(bits 15..0) -- the *reusable* half of a
+// descriptor, set once via the real, already-working, unmodified CSRRW (no
+// new "set" instruction needed) and then read directly by
+// `VEDA_ODT_POPULATE_FAST` below for every object sharing that template.
+// Reset to zero (harmless: an all-zero Length/Perms just makes the first
+// fast-populated object real but permission-less until software actually
+// sets this CSR, not a crash/undefined-behavior risk).
+register veda_attr : bits(32)
+
 // Milestone 14: four new CSRs in the real, standard RISC-V "Machine-
 // level Custom read/write" address range (riscv-spec.pdf Table 91,
 // "Allocation of RISC-V CSR address ranges," p.664: 0x7C0-0x7FF) --
@@ -94,26 +108,32 @@ function veda_pcc_save_and_reset() -> unit = {
 // CSRRS (no new instruction), following the exact same real
 // `scattered function`/`scattered mapping` clause mechanism this
 // codebase's own core/sys_regs.sail already uses for mtvec/mcause/etc.
-// (read directly before writing this, not assumed).
+// (read directly before writing this, not assumed). Milestone 18 reuses
+// this exact same real range/mechanism for `veda_attr` at 0x7C4, the
+// next free slot after Milestone 14's four.
 mapping clause csr_name_map = 0x7C0 <-> "veda_pcc_base"
 mapping clause csr_name_map = 0x7C1 <-> "veda_pcc_length"
 mapping clause csr_name_map = 0x7C2 <-> "veda_mepcc_base"
 mapping clause csr_name_map = 0x7C3 <-> "veda_mepcc_length"
+mapping clause csr_name_map = 0x7C4 <-> "veda_attr"
 
 function clause is_CSR_accessible(0x7C0, _, _) = currentlyEnabled(Ext_Veda)
 function clause is_CSR_accessible(0x7C1, _, _) = currentlyEnabled(Ext_Veda)
 function clause is_CSR_accessible(0x7C2, _, _) = currentlyEnabled(Ext_Veda)
 function clause is_CSR_accessible(0x7C3, _, _) = currentlyEnabled(Ext_Veda)
+function clause is_CSR_accessible(0x7C4, _, _) = currentlyEnabled(Ext_Veda)
 
 function clause read_CSR(0x7C0) = zero_extend(veda_pcc_base)
 function clause read_CSR(0x7C1) = zero_extend(veda_pcc_length)
 function clause read_CSR(0x7C2) = zero_extend(veda_mepcc_base)
 function clause read_CSR(0x7C3) = zero_extend(veda_mepcc_length)
+function clause read_CSR(0x7C4) = zero_extend(veda_attr)
 
 function clause write_CSR(0x7C0, value) = { veda_pcc_base = value[31..0]; Ok(zero_extend(veda_pcc_base)) }
 function clause write_CSR(0x7C1, value) = { veda_pcc_length = value[15..0]; Ok(zero_extend(veda_pcc_length)) }
 function clause write_CSR(0x7C2, value) = { veda_mepcc_base = value[31..0]; Ok(zero_extend(veda_mepcc_base)) }
 function clause write_CSR(0x7C3, value) = { veda_mepcc_length = value[15..0]; Ok(zero_extend(veda_mepcc_length)) }
+function clause write_CSR(0x7C4, value) = { veda_attr = value[31..0]; Ok(zero_extend(veda_attr)) }
 
 function rC(Vcapno(r) : vcapno) -> capability = {
   match r {

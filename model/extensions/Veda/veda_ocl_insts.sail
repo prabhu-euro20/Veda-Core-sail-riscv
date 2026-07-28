@@ -406,3 +406,65 @@ mapping clause assembly = VEDA_ODT_POPULATE(rs2, rs1, rd)
 
 mapping clause assembly = VEDA_ODT_DESTROY(rs1, rd)
   <-> "veda.odt.destroy" ^ spc() ^ reg_name(rd) ^ sep() ^ reg_name(rs1)
+
+// Milestone 18 (IMMEDIATE_LIMIT_INVESTIGATION): a second Populate encoding
+// that avoids the 64-bit packed-descriptor `li` entirely. Real, measured
+// motivation: RV64I's 12-bit immediate forces a full 6-instruction `li`
+// per object under plain VEDA_ODT_POPULATE above, and a real, dedicated
+// benchmark showed a software-only `la`-based workaround saves only ~5%
+// (Base still has to be shifted into the descriptor's upper 32 bits
+// regardless of how it's loaded). Here `rs2` is Base directly (loadable
+// via a clean, real 2-instruction `la`, no shifting/packing needed) and
+// Length/Perms come from `veda_attr` (veda_regs.sail, CSR 0x7C4) --
+// intended for the real, common case of multiple objects sharing one
+// size/permission template, the same real pattern the IMMEDIATE_LIMIT
+// benchmark's "optimized" program already used in software. Same
+// Custom-0 major opcode, funct3 = 000 (grouping with the Populate
+// family), funct7 = 0000100 -- the next genuinely free slot, verified by
+// grepping every existing $is_veda_* decode condition in veda_core.tlv
+// before choosing it (Custom-0's existing allocations: OCL 011/0000000,
+// OCS 011/0000001, OCL.C 100/0000000, OCS.C 100/0000001, ODT-Populate
+// 000/0000011, ODT-Destroy 001/0000011, NMC_ADD.W 010/0000010,
+// NMC_ADD.D 011/0000010, Bind 101/any).
+union clause instruction = VEDA_ODT_POPULATE_FAST : (regidx, regidx, regidx)
+
+mapping clause encdec = VEDA_ODT_POPULATE_FAST(rs2, rs1, rd)
+  <-> 0b0000100 @ encdec_reg(rs2) @ encdec_reg(rs1) @ 0b000 @ encdec_reg(rd) @ 0b0001011
+  when currentlyEnabled(Ext_Veda) & xlen == 64
+
+// Identical privilege/retired/generation-counter logic to VEDA_ODT_POPULATE
+// above (deliberately mirrored, not refactored into a shared helper --
+// this codebase's own established style keeps each instruction's execute
+// clause self-contained and independently readable/auditable, matching
+// how VEDA_ODT_DESTROY above already duplicates rather than shares logic
+// with VEDA_ODT_POPULATE). The only real difference: Base = X(rs2)
+// directly (no packed-descriptor unpacking), Length/Perms = veda_attr.
+function clause execute VEDA_ODT_POPULATE_FAST(rs2, rs1, rd) = {
+  if not(cur_privilege == Machine | veda_oda_authorized()) then Illegal_Instruction()
+  else {
+    let object_id : bits(23) = X(rs1)[22..0];
+    let base : bits(32) = X(rs2)[31..0];
+    let old_entry = odt_lookup(object_id);
+    if old_entry.retired then Illegal_Instruction()
+    else {
+      let new_generation : bits(8) =
+        if old_entry.valid then (if old_entry.generation == 0xff then 0xff else old_entry.generation + 1)
+        else old_entry.generation;
+      let new_retired : bool = old_entry.valid & (old_entry.generation == 0xff);
+      odt_write(object_id, struct {
+        valid      = true,
+        Base       = base,
+        Length     = veda_attr[31..16],
+        Perms      = veda_attr[15..0],
+        generation = new_generation,
+        owner_hart = VEDA_OWNER_UNOWNED,
+        retired    = new_retired,
+      });
+      X(rd) = zeros();
+      RETIRE_SUCCESS
+    }
+  }
+}
+
+mapping clause assembly = VEDA_ODT_POPULATE_FAST(rs2, rs1, rd)
+  <-> "veda.odt.populate.fast" ^ spc() ^ reg_name(rd) ^ sep() ^ reg_name(rs1) ^ sep() ^ reg_name(rs2)

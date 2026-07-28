@@ -419,6 +419,83 @@ function clause execute VEDA_OCINVOKE(rs2, rs1) = {
 mapping clause assembly = VEDA_OCINVOKE(rs2, rs1)
   <-> "ocinvoke" ^ spc() ^ vcap_name(encdec_vcap(rs1)) ^ sep() ^ vcap_name(encdec_vcap(rs2))
 
+// OCJALR (STACK_FRAME_CALL_RETURN_ANALYSIS.md): the real, honest gap that
+// analysis found by testing rather than assuming -- a return-address
+// convention built entirely from already-existing instructions (a
+// long-lived stack-object capability, `OCA` to derive a return-capability,
+// `CSeal` to protect it) worked when the caller *remembered* an explicit
+// `CGetTag` check before using the reloaded value, but nothing stopped
+// the check from being silently omitted: `CUnseal`+`CGetAddr`+`JALR`
+// compose into a working (if undefined-on-corruption) jump with no
+// hardware gate at all. `OCJALR` closes that specific gap: it merges
+// unseal-verification and jump into one atomic instruction, so the check
+// cannot be forgotten by construction, the same real property real
+// CHERI's own `CJALR` provides for its own sentry-capability jumps
+// (`CapEx_SealViolation` on a sealed-but-wrong capability, CHERI ISA spec
+// p.213, `7.4 CHERI-RISC-V INSTRUCTIONS: CJALR`, full semantics read).
+//
+// Deliberately narrower than real CHERI's own `CJALR`, not a full port:
+// real `CJALR` is a general jump-through-any-capability instruction (used
+// for ordinary calls too) that also *mints* a new sentry-sealed return
+// capability as a side effect of every jump, using a dedicated reserved
+// `otype` sentinel distinct from `CSeal`'s general type-authority
+// mechanism. `OCJALR` here is scoped to exactly the half the
+// vulnerability was in -- the *verify-and-consume* side of an
+// already-sealed return-capability -- reusing Milestone 6's existing,
+// already-verified general-purpose `CSeal`/`CUnseal` type-authority model
+// (the call site already works today, unmodified, via `OCA`+`CSeal`) so
+// no second, parallel sealing mechanism needs to be invented for this one
+// purpose. `rd` is reserved and unused, matching `OCInvoke`'s own
+// established precedent for an instruction whose real output is a PC
+// redirect, not a register value.
+union clause instruction = VEDA_OCJALR : (vcapidx, vcapidx)
+
+// funct7 = 0010100, the next genuinely unused Custom-2/funct3=001 slot --
+// verified directly against every existing user of this space before
+// picking it (OCA=0001010, CSeal=0010000, CUnseal=0010001,
+// OCInvoke=0010010, OSpecialRW=0010011 -- 0010011 was this instruction's
+// own first draft value, caught as a real, narrow encoding collision with
+// the already-existing OSpecialRW before any RTL was written: OSpecialRW
+// hardwires its own rs2-position field to all-zero rather than treating
+// it as a real operand, so the collision would only have bitten a
+// subset of encodings -- OCJALR instances with cs2 = c0 -- rather than
+// failing every test immediately, exactly the kind of narrow, easy-to-
+// miss bug this project's "verify before deciding" discipline exists to
+// catch before it ships).
+mapping clause encdec = VEDA_OCJALR(rs2, rs1)
+  <-> 0b0010100 @ 0b0 @ encdec_vcap(rs2) @ 0b0 @ encdec_vcap(rs1) @ 0b001 @ 0b0 @ 0b0000 @ 0b1011011
+  when currentlyEnabled(Ext_Veda)
+
+// rs1 = the (possibly-corrupted) sealed return-capability being verified
+// and jumped through; rs2 = the same seal-authority capability the call
+// site's own `CSeal` used. Check order chosen to match real, established
+// precedent rather than invented fresh: `Seal Violation` (cause 0x03) is
+// VEDA_CORE_SPEC.md's own already-verified mapping for exactly this
+// condition on real CHERI's `CJALR` (Section 3 of the spec cites this
+// directly); `Type Violation` (0x04) and `Permit_Execute Violation`
+// (0x11) reuse `OCInvoke`'s own already-active checks for the identical
+// underlying conditions (authority mismatch, missing execute permission).
+function clause execute VEDA_OCJALR(rs2, rs1) = {
+  let cs1idx = vcapidx_to_vcapno(rs1);
+  let cs2idx = vcapidx_to_vcapno(rs2);
+  let cs1 = C(cs1idx);
+  let cs2 = C(cs2idx);
+  if not(CTag(cs1idx)) then veda_trap(rs1, VEDA_CAUSE_TAG_VIOLATION)
+  else if not(CTag(cs2idx)) then veda_trap(rs2, VEDA_CAUSE_TAG_VIOLATION)
+  else if not(isSealedCap(cs1)) then veda_trap(rs1, VEDA_CAUSE_SEAL_VIOLATION)
+  else if isSealedCap(cs2) then veda_trap(rs2, VEDA_CAUSE_SEAL_VIOLATION)
+  else if not(permBit(cs2.Perms, PERM_UNSEAL)) then veda_trap(rs2, VEDA_CAUSE_SEAL_VIOLATION)
+  else if cs2.Offset != cs1.otype then veda_trap(rs1, VEDA_CAUSE_TYPE_VIOLATION)
+  else if not(permBit(cs1.Perms, PERM_EXECUTE)) then veda_trap(rs1, VEDA_CAUSE_PERM_EXECUTE_VIOLATION)
+  else {
+    let target : xlenbits = zero_extend(cs1.Base) + zero_extend(cs1.Offset);
+    jump_to([target with 0 = bitzero])
+  }
+}
+
+mapping clause assembly = VEDA_OCJALR(rs2, rs1)
+  <-> "ocjalr" ^ spc() ^ vcap_name(encdec_vcap(rs1)) ^ sep() ^ vcap_name(encdec_vcap(rs2))
+
 // OSpecialRW (VEDA_CORE_SPEC.md Section 6 item 8, formerly NEXT_STEPS_
 // ROADMAP.md §2.5): term-for-term adaptation of real CHERI's own
 // CSpecialRW (CHERI ISA spec §4.3.6/p.235), reading and writing

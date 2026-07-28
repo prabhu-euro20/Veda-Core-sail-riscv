@@ -38,6 +38,9 @@ function ext_reset() -> unit = {
   veda_pcc_length = VEDA_PCC_UNBOUNDED;
   veda_mepcc_base = zeros();
   veda_mepcc_length = VEDA_PCC_UNBOUNDED;
+  // Milestone 18: explicit zero, matching this function's own existing
+  // explicit-reset style above (Sail's own default is already zero).
+  veda_attr = zeros();
 }
 
 // Veda-Core Milestone 14 (rva23-core/veda-core/PCC_COMPARTMENT_DESIGN.md):
