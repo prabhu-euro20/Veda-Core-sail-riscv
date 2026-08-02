@@ -93,6 +93,20 @@ public:
   // returns std::nullopt if the model has not thrown an exception.
   std::optional<std::string> string_of_current_exception();
 
+  // Veda-Core capability register file (c0-c15). Pulls the *live* current
+  // value directly via the real Sail-generated rC/rCTag accessors (there
+  // is no write-callback for capability registers the way there is for
+  // GPRs, so this is a pull, not a push-tracked shadow -- capability
+  // registers are a Veda-Core-specific extension with no base-model
+  // callback hook, confirmed by reading veda_regs.sail and
+  // riscv_callbacks_if.h in full before adding this).
+  // out_bytes must point to a 16-byte buffer; filled with the real,
+  // already-verified hardware packing (veda_cap_pack, the same function
+  // OCL.C/OCS.C use for capability-width memory access), not a
+  // hand-rolled re-encoding.
+  void pack_veda_capability_reg(int index, uint8_t out_bytes[16]);
+  bool read_veda_capability_tag(int index);
+
   // RVFI support
 
   friend class rvfi_handler;

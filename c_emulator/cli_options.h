@@ -26,6 +26,7 @@ struct CLIOptions {
   std::string trace_log_path = {};
   std::string dtb_file;
   unsigned rvfi_dii_port = 0;
+  unsigned gdbstub_port = 0;
   std::vector<std::string> elfs;
   uint64_t insn_limit = 0;
   std::optional<uint64_t> stop_at_pc;
@@ -49,6 +50,7 @@ struct CLIOptions {
   bool config_print_htif = false;
   bool config_print_pma = false;
   bool config_print_rvfi = false;
+  bool config_print_gdbstub = false;
   bool config_print_step = false;
   bool config_print_ptw = false;
   bool config_print_tlb = false;

@@ -309,6 +309,18 @@ void run_sail(
       }
     }
 
+    if (run_info.gdbstub.has_value()) {
+      switch (run_info.gdbstub->pre_step(opts.config_print_gdbstub)) {
+      case gdb_prestep_t::GDB_prestep_continue:
+        continue;
+      case gdb_prestep_t::GDB_prestep_eof:
+        run_info.gdbstub = std::nullopt;
+        return;
+      case gdb_prestep_t::GDB_prestep_ok:
+        break;
+      }
+    }
+
     model.call_pre_step_callbacks(is_waiting);
 
     { /* run a Sail step */
@@ -500,6 +512,11 @@ InitResult preinit_model(
     run_info.rvfi.emplace(opts.rvfi_dii_port, model);
   }
 
+  if (opts.gdbstub_port != 0) {
+    run_info.gdbstub_cb = std::make_shared<gdb_stub_callbacks>();
+    run_info.gdbstub.emplace(opts.gdbstub_port, model, run_info.gdbstub_cb);
+  }
+
   if (opts.config_enable_experimental_extensions) {
     fprintf(stderr, "enabling unratified extensions.\n");
     model.set_enable_experimental_extensions(true);
@@ -574,6 +591,13 @@ uint64_t init_model(CLIOptions &opts, ModelImpl &model, elf_info &elf_info, run_
     model.register_callback(std::make_shared<rvfi_callbacks>());
   }
 
+  if (run_info.gdbstub.has_value()) {
+    if (!run_info.gdbstub->setup_socket(opts.config_print_gdbstub)) {
+      return 1;
+    }
+    model.register_callback(run_info.gdbstub_cb);
+  }
+
   if (!opts.dtb_file.empty()) {
     fprintf(stderr, "using %s as DTB file.\n", opts.dtb_file.c_str());
     write_dtb_to_rom(model, read_file(opts.dtb_file));
@@ -583,6 +607,10 @@ uint64_t init_model(CLIOptions &opts, ModelImpl &model, elf_info &elf_info, run_
                                              : load_sail(model, opts.elfs[0], /*main_file=*/true, elf_info);
 
   fprintf(stdout, "Entry point: 0x%" PRIx64 "\n", entry);
+
+  if (run_info.gdbstub_cb) {
+    run_info.gdbstub_cb->set_initial_pc(entry);
+  }
 
   // Load any additional ELF files into memory. If RVFI was NOT used skip
   // the first one because it was loaded above.

@@ -62,6 +62,9 @@ CLIOptions parse_cli(int argc, char **argv) {
   app.add_option("--rvfi-dii", opts.rvfi_dii_port, "RVFI DII port")
     ->check(CLI::Range(1, 65535))
     ->option_text("<int> (within [1 - 65535])");
+  app.add_option("--gdbstub", opts.gdbstub_port, "GDB remote serial protocol stub port")
+    ->check(CLI::Range(1, 65535))
+    ->option_text("<int> (within [1 - 65535])");
   app.add_option("--inst-limit", opts.insn_limit, "Instruction limit")->option_text("<uint>");
   app.add_option("--stop-at-pc", opts.stop_at_pc, "Stop execution when PC reaches address")->option_text("<address>");
 #ifdef SAILCOV
@@ -105,6 +108,7 @@ CLIOptions parse_cli(int argc, char **argv) {
   );
   app.add_flag("--trace-mem", opts.config_print_mem_access, "Enable trace output for memory accesses");
   app.add_flag("--trace-rvfi", opts.config_print_rvfi, "Enable trace output for RVFI");
+  app.add_flag("--trace-gdbstub", opts.config_print_gdbstub, "Enable trace output for the GDB stub");
   app.add_flag("--trace-clint", opts.config_print_clint, "Enable trace output for CLINT memory accesses and status");
   app.add_flag("--trace-exception", opts.config_print_exception, "Enable trace output for exceptions");
   app.add_flag("--trace-interrupt", opts.config_print_interrupt, "Enable trace output for interrupts");
@@ -134,6 +138,7 @@ CLIOptions parse_cli(int argc, char **argv) {
       opts.config_print_csr = true;
       opts.config_print_mem_access = true;
       opts.config_print_rvfi = true;
+      opts.config_print_gdbstub = true;
       opts.config_print_clint = true;
       opts.config_print_exception = true;
       opts.config_print_interrupt = true;

@@ -1,9 +1,12 @@
 #pragma once
 
+#include "gdbstub.h"
+#include "riscv_callbacks_gdbstub.h"
 #include "rvfi_dii.h"
 
 #include <chrono>
 #include <map>
+#include <memory>
 #include <optional>
 #include <string>
 #include <unistd.h>
@@ -25,6 +28,8 @@ struct elf_info {
 
 struct run_info {
   std::optional<rvfi_handler> rvfi = {};
+  std::shared_ptr<gdb_stub_callbacks> gdbstub_cb = {};
+  std::optional<gdb_handler> gdbstub = {};
   // Terminal output goes to stdout unless changed via the `--terminal-log` option.
   int term_fd = STDOUT_FILENO;
   bool close_term_fd = false;
