@@ -56,16 +56,28 @@ function ext_handle_control_check_error(_err : ext_control_addr_error) -> unit =
   ()
 
 
-// The default data address function does not perform any checks so
-// just uses unit for error type.
-type ext_data_addr_error = unit
+// Veda-Core Milestone 19 (Veda-Purecap Enforcement): widened from a plain
+// `unit` to carry a real (cap_idx, cause) payload, mirroring
+// veda_xtval's own two-part signature (extensions/Veda/veda_bind_insts.sail)
+// exactly, not reinvented -- confirmed safe via a full-codebase grep before
+// making this change: the extensions that already propagate this type
+// opaquely through `Ext_DataAddr_Check_Failure` (Zaamo, Zicbom, Zicfiss,
+// Zicboz, all currently disabled in this project's own test config) never
+// construct or pattern-match its internal shape themselves, only ever
+// forward whatever `ext_data_get_addr` returned.
+struct ext_data_addr_error = {
+  cap_idx : bits(5),
+  cause   : bits(5),
+}
 
-// Default data addr is just base register + immediate offset (may be zero).
-// Extensions might override and add additional checks.
-function ext_data_get_addr(base : regidx, offset : xlenbits, _access : MemoryAccessType(mem_payload), _width : mem_access_width)
-         -> Ext_DataAddr_Check(ext_data_addr_error) =
-  let addr = Virtaddr(X(base) + offset) in
-  Ext_DataAddr_OK(addr)
+// Veda-Core Milestone 19: the real body now lives in postlude/step_ext.sail,
+// for the identical real reason ext_fetch_check_pc's body already does (see
+// above) -- it must reference Veda's own `veda_mode`/`veda_pcc_length`
+// registers, only visible once `Veda_insts` is required (`postlude`
+// requires it, `core` does not, confirmed directly against
+// riscv.sail_project, the same real module-ordering constraint already
+// documented above ext_fetch_check_pc). Only the forward `val` stays here,
+// referencing nothing Veda-specific.
+val ext_data_get_addr : (regidx, xlenbits, MemoryAccessType(mem_payload), mem_access_width) -> Ext_DataAddr_Check(ext_data_addr_error)
 
-function ext_handle_data_check_error(_err : ext_data_addr_error) -> unit =
-  ()
+val ext_handle_data_check_error : ext_data_addr_error -> unit
