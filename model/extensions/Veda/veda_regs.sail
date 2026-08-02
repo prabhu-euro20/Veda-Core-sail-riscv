@@ -98,6 +98,17 @@ function veda_pcc_save_and_reset() -> unit = {
 // sets this CSR, not a crash/undefined-behavior risk).
 register veda_attr : bits(32)
 
+// Milestone 19 (Veda-Purecap Enforcement): next free slot in the same
+// real, RISC-V-spec-reserved M-mode custom range already used for
+// 0x7C0-0x7C4 above -- same mechanism, not a new one. Bit 0 =
+// veda_purecap: global "ordinary LOAD/STORE/AMO/etc. is illegal
+// everywhere" flag, closing the real gap this milestone exists for (see
+// veda_bind_insts.sail's VEDA_CAUSE_PURECAP_VIOLATION comment for the
+// full reasoning). Bits 1-31 reserved for future mode bits, explicitly
+// zero for now: read_CSR reports them as 0, write_CSR ignores them (only
+// bit 0 is ever assigned from a write).
+register veda_mode : bits(32)
+
 // Milestone 14: four new CSRs in the real, standard RISC-V "Machine-
 // level Custom read/write" address range (riscv-spec.pdf Table 91,
 // "Allocation of RISC-V CSR address ranges," p.664: 0x7C0-0x7FF) --
@@ -116,24 +127,105 @@ mapping clause csr_name_map = 0x7C1 <-> "veda_pcc_length"
 mapping clause csr_name_map = 0x7C2 <-> "veda_mepcc_base"
 mapping clause csr_name_map = 0x7C3 <-> "veda_mepcc_length"
 mapping clause csr_name_map = 0x7C4 <-> "veda_attr"
+mapping clause csr_name_map = 0x7C5 <-> "veda_mode"
 
 function clause is_CSR_accessible(0x7C0, _, _) = currentlyEnabled(Ext_Veda)
 function clause is_CSR_accessible(0x7C1, _, _) = currentlyEnabled(Ext_Veda)
 function clause is_CSR_accessible(0x7C2, _, _) = currentlyEnabled(Ext_Veda)
 function clause is_CSR_accessible(0x7C3, _, _) = currentlyEnabled(Ext_Veda)
 function clause is_CSR_accessible(0x7C4, _, _) = currentlyEnabled(Ext_Veda)
+function clause is_CSR_accessible(0x7C5, _, _) = currentlyEnabled(Ext_Veda)
 
 function clause read_CSR(0x7C0) = zero_extend(veda_pcc_base)
 function clause read_CSR(0x7C1) = zero_extend(veda_pcc_length)
 function clause read_CSR(0x7C2) = zero_extend(veda_mepcc_base)
 function clause read_CSR(0x7C3) = zero_extend(veda_mepcc_length)
 function clause read_CSR(0x7C4) = zero_extend(veda_attr)
+function clause read_CSR(0x7C5) = zero_extend(veda_mode)
 
-function clause write_CSR(0x7C0, value) = { veda_pcc_base = value[31..0]; Ok(zero_extend(veda_pcc_base)) }
-function clause write_CSR(0x7C1, value) = { veda_pcc_length = value[15..0]; Ok(zero_extend(veda_pcc_length)) }
-function clause write_CSR(0x7C2, value) = { veda_mepcc_base = value[31..0]; Ok(zero_extend(veda_mepcc_base)) }
-function clause write_CSR(0x7C3, value) = { veda_mepcc_length = value[15..0]; Ok(zero_extend(veda_mepcc_length)) }
+// Milestone 20 (real, empirically-confirmed vulnerability, not
+// theorized): before this pass, all four of these writes were
+// unconditional -- meaning code entered via a real OCInvoke (narrowed to
+// its own Base/Length, veda_pcc_length != VEDA_PCC_UNBOUNDED) could
+// simply `csrw 0x7c1, 0xFFFF` to widen its own compartment back to
+// unbounded and escape, no trap, no restriction, using only instructions
+// that already existed. Verified live via a real PoC run under
+// sail_riscv_sim before this fix: a compartment narrowed to Length=0x40
+// executed the ordinary CSR write and then continued executing PAST the
+// original boundary with zero trap. Real CHERI's own actual rule
+// (verified via its public documentation): "Reading or writing any CSR
+// requires the Access_System_Registers permission on the PCC" -- Veda
+// -Core had no equivalent gate at all for its own compartment-state
+// CSRs. Fix: require `veda_pcc_length == VEDA_PCC_UNBOUNDED` (i.e. not
+// currently inside a live compartment) before any of these four writes
+// is allowed; otherwise call `veda_pcc_save_and_reset()` (the identical
+// real discipline every other Veda hard-trap already follows, so the
+// resulting trap handler runs unconstrained, not still narrowed) and
+// return `Err(())` -- confirmed via direct read of
+// extensions/Zicsr/zicsr_insts.sail's own `doCSR` dispatch
+// (`Err(()) => Illegal_Instruction()`) and core/csr_begin.sail's real
+// declared signature (`result(xlenbits, unit)`) that this is a real,
+// already-proven, idiomatic hard-trap mechanism -- not a silent no-op,
+// and not a new one invented for this purpose. Read access is
+// deliberately NOT gated -- matches this file's own already-established
+// "capability metadata is always inspectable" principle
+// (veda_cap_insts.sail's query-family comment): code inside a
+// compartment already knows its own bounds (it got there via the
+// capability that defined them), so reading them back leaks nothing.
+// `veda_mepcc_base`/`_length` (0x7C2/0x7C3) are gated identically, not
+// just 0x7C0/0x7C1 -- the same escape generalizes trivially to forging
+// the *saved* bounds a trap handler's own restore convention would later
+// trust, a second real attack this same fix closes, not just the one the
+// PoC directly demonstrated. `veda_attr` (0x7C4) is deliberately NOT
+// gated here -- its sole consumer, VEDA_ODT_POPULATE_FAST, already has
+// its own independent capability-authority gate (`veda_oda_authorized()`
+// OR M-mode, Milestone 11), so a compartment rewriting `veda_attr` alone
+// cannot use it for anything without separately satisfying that
+// unrelated check -- considered and correctly excluded, not overlooked.
+function clause write_CSR(0x7C0, value) = {
+  if veda_pcc_length != VEDA_PCC_UNBOUNDED then { veda_pcc_save_and_reset(); Err(()) }
+  else { veda_pcc_base = value[31..0]; Ok(zero_extend(veda_pcc_base)) }
+}
+function clause write_CSR(0x7C1, value) = {
+  if veda_pcc_length != VEDA_PCC_UNBOUNDED then { veda_pcc_save_and_reset(); Err(()) }
+  else { veda_pcc_length = value[15..0]; Ok(zero_extend(veda_pcc_length)) }
+}
+function clause write_CSR(0x7C2, value) = {
+  if veda_pcc_length != VEDA_PCC_UNBOUNDED then { veda_pcc_save_and_reset(); Err(()) }
+  else { veda_mepcc_base = value[31..0]; Ok(zero_extend(veda_mepcc_base)) }
+}
+function clause write_CSR(0x7C3, value) = {
+  if veda_pcc_length != VEDA_PCC_UNBOUNDED then { veda_pcc_save_and_reset(); Err(()) }
+  else { veda_mepcc_length = value[15..0]; Ok(zero_extend(veda_mepcc_length)) }
+}
 function clause write_CSR(0x7C4, value) = { veda_attr = value[31..0]; Ok(zero_extend(veda_attr)) }
+// Milestone 19: M-mode-write-gated, explicitly, inside this clause --
+// matching VEDA_OSPECIALRW's own established precedent
+// (veda_cap_insts.sail) for "privileged Veda operations check
+// cur_privilege explicitly in their own body," not any CSR-address
+// -encoded privilege mechanism (which, noted honestly, does not
+// independently gate 0x7C0-0x7C4 either -- a pre-existing gap this
+// milestone matches consistently rather than silently fixing under a
+// different milestone's own scope). A non-M-mode write is a silent
+// no-op (CSR value unchanged), the safe failure direction (a non-M-mode
+// write attempting to *disable* purecap mode simply fails to take
+// effect) -- retained as-is; only the compartment-state check below is
+// new (Milestone 20's own real Err(())/Illegal_Instruction mechanism,
+// not a silent no-op -- the original comment here calling that
+// "unavailable" was itself wrong, corrected via direct source read of
+// core/csr_begin.sail's real declared write_CSR signature,
+// result(xlenbits, unit), before writing Milestone 20's own fix above).
+// Milestone 20: same real self-escape vector as 0x7C0-0x7C3 above --
+// code inside a live compartment could `csrw 0x7c5, 0` to silently
+// disable Milestone 19's own purecap enforcement out from under itself.
+// Gated identically.
+function clause write_CSR(0x7C5, value) = {
+  if veda_pcc_length != VEDA_PCC_UNBOUNDED then { veda_pcc_save_and_reset(); Err(()) }
+  else {
+    if cur_privilege == Machine then veda_mode = zero_extend(value[0..0]);
+    Ok(zero_extend(veda_mode))
+  }
+}
 
 function rC(Vcapno(r) : vcapno) -> capability = {
   match r {
