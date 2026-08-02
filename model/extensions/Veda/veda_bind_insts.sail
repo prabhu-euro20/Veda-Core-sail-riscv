@@ -41,6 +41,28 @@ let VEDA_CAUSE_PERM_INVOKE_VIOLATION  : bits(5) = 0b11001 // 0x19
 // CHERI equivalent, since CHERI has no concept of an object being
 // "claimed" by one hart's own Object-Bind at all.
 let VEDA_CAUSE_OWNER_VIOLATION : bits(5) = 0b00110 // 0x06
+// Milestone 19 (Veda-Purecap Enforcement): VEDA_CORE_SPEC.md Section 3's
+// own cause table lists 0x07 as "reserved" -- the next genuinely free
+// value in the already-existing reservation, confirmed via a full grep of
+// every VEDA_CAUSE_* constant in this file before picking it, not chosen
+// arbitrarily. Fires when an ordinary (non-Veda) memory access is
+// attempted either (a) while `veda_mode`'s `veda_purecap` bit is set
+// (veda_regs.sail, CSR 0x7C5) -- closing the real gap where VEDA_CGETBASE
+// legitimately exposes a capability's raw Base into a GPR (a real,
+// spec-required query, Section 1's own "metadata is always inspectable"
+// principle) but nothing previously stopped that GPR value from then
+// being used as an ordinary LOAD/STORE base with zero capability check at
+// all, the same real property CHERI's own "hybrid mode" has -- or (b)
+// while executing inside a live OCInvoke-entered compartment
+// (veda_pcc_length != VEDA_PCC_UNBOUNDED), closing a second, related gap:
+// Milestone 14's PCC-bounding enforces compartment isolation for
+// instruction fetch only, not ordinary data access. See
+// postlude/step_ext.sail's ext_handle_data_check_error for where this
+// cause is actually raised (via the same direct-construction technique
+// the PCC-fetch-violation path already uses, not through veda_trap/
+// vcapidx, since no real capability register is involved in either
+// triggering condition).
+let VEDA_CAUSE_PURECAP_VIOLATION : bits(5) = 0b00111 // 0x07
 
 function veda_xtval(cap_idx : bits(4), cause : bits(5)) -> xlenbits = {
   // Deliberately avoids the two-argument `zero_extend(bits, width)` form --
