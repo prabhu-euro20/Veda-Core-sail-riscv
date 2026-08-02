@@ -15,7 +15,15 @@ function ext_check_xret_priv (_p : Privilege) : Privilege -> bool = true
 // Called if above check fails
 function ext_fail_xret_priv () : unit -> unit = ()
 
-function handle_trap_extension(_p : Privilege, _pc : xlenbits, _u : option(unit)) -> unit = ()
+// Veda-Core Milestone 21: the real body now lives in
+// postlude/step_ext.sail, the identical real reason ext_fetch_check_pc's
+// and ext_data_get_addr's bodies already do (needs veda_pcc_length/
+// veda_pcc_save_and_reset, only visible once Veda_insts is required --
+// Veda_insts itself requires `exceptions`, confirmed directly against
+// riscv.sail_project, so a function body living in this file could never
+// see a Veda-defined register no matter how it were written). Only the
+// forward `val` stays here.
+val handle_trap_extension : (Privilege, xlenbits, option(unit)) -> unit
 
 // used for traps and ECALL
 function prepare_trap_vector(p : Privilege, cause : Mcause) -> xlenbits = {
