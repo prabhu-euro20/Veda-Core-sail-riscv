@@ -210,3 +210,15 @@ enum veda_atomicop = {VEDA_AMOSWAP, VEDA_AMOADD, VEDA_AMOXOR, VEDA_AMOAND, VEDA_
 
 // Milestone V-B: Veda-Cap query family's selector enum, same reason.
 enum veda_capquery = {VEDA_CGETBASE, VEDA_CGETLEN, VEDA_CGETPERM, VEDA_CGETTAG, VEDA_CGETTYPE, VEDA_CGETADDR, VEDA_CGETOFFSET}
+
+// Minimal OS kernel Milestone A (MINIMAL_OS_KERNEL_DESIGN.md): OSpecialRW's
+// own SCR-selector enum, same real scattered-ordering reason as above --
+// placed here preemptively rather than re-discovering the identical
+// compile error a third time. OSpecialRW's own previously-hardcoded
+// `00000` field (veda_cap_insts.sail) becomes this real selector: 0 = ODA
+// (Milestone 11's own existing register, unchanged, so every pre-existing
+// `ospecialrw` encoding -- which always had that field as literal zero --
+// continues to mean exactly what it always meant, a real, verified
+// backward-compatibility property, not just an assumption), 1 = TSC (the
+// new Trusted Stack Capability this milestone adds).
+enum veda_scr = {VEDA_SCR_ODA, VEDA_SCR_TSC}

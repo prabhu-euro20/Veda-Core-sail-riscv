@@ -41,6 +41,23 @@ register crTags : bits(16)
 register veda_oda : capability
 register veda_oda_tag : bool
 
+// Minimal OS kernel Milestone A (MINIMAL_OS_KERNEL_DESIGN.md): the TSC
+// (Trusted Stack Capability) -- Veda-Core's own second Special Capability
+// Register, term-for-term adapted from real CHERIoT's own `mtdc` (M-mode
+// Trusted Data Capability, CHERIoT RTOS architecture.md's own real
+// switcher description, read in full: "the switcher... store[s] a
+// capability to the current thread's trusted stack and register-save
+// area in the mtdc capability special register"). A real, tagged
+// capability -- not a plain CSR -- for the identical real reason
+// `veda_oda` above is one: it must carry Base/Length/Perms/Tag, none of
+// which a 64-bit CSR can hold. Kept as its own top-level register (not
+// `cr16`), matching `veda_oda`'s own established precedent: a genuinely
+// different architectural role (the switcher's own anchor to the
+// current thread's register-save area) from any general-purpose
+// capability register.
+register veda_tsc : capability
+register veda_tsc_tag : bool
+
 // Milestone 14 (PCC_COMPARTMENT_DESIGN.md): the currently-active
 // `OCInvoke`-entered compartment's own bounds, and their saved copy
 // across a trap -- Base(32)/Length(16), matching the ODT entry's own

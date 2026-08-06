@@ -509,13 +509,28 @@ mapping clause assembly = VEDA_OCJALR(rs2, rs1)
 // privilege alone (cur_privilege == Machine) -- the identical, already-
 // established convention ODT_POPULATE/ODT_DESTROY themselves use, not a
 // new one invented for this instruction specifically.
-union clause instruction = VEDA_OSPECIALRW : (vcapidx, vcapidx)
+//
+// Minimal OS kernel Milestone A: the field that was previously
+// hardcoded `00000` (real CHERI's own `CSpecialRW cd, scr, cs1` already
+// has a genuine SCR-index operand in exactly this position -- Veda-Core
+// simply never needed it before, with only one real SCR to select)
+// becomes a real `veda_scr` selector. Chosen encoding value for ODA
+// (0b00000) is byte-for-byte identical to every `ospecialrw` encoding
+// this codebase has ever produced, so this is a real, verified backward
+// -compatible extension, not a breaking change to an existing
+// instruction -- confirmed by construction, not merely assumed.
+union clause instruction = VEDA_OSPECIALRW : (veda_scr, vcapidx, vcapidx)
 
-mapping clause encdec = VEDA_OSPECIALRW(rs1, rd)
-  <-> 0b0010011 @ 0b00000 @ 0b0 @ encdec_vcap(rs1) @ 0b001 @ 0b0 @ encdec_vcap(rd) @ 0b1011011
+mapping encdec_veda_scr : veda_scr <-> bits(5) = {
+  VEDA_SCR_ODA <-> 0b00000,
+  VEDA_SCR_TSC <-> 0b00001,
+}
+
+mapping clause encdec = VEDA_OSPECIALRW(scr, rs1, rd)
+  <-> 0b0010011 @ encdec_veda_scr(scr) @ 0b0 @ encdec_vcap(rs1) @ 0b001 @ 0b0 @ encdec_vcap(rd) @ 0b1011011
   when currentlyEnabled(Ext_Veda)
 
-function clause execute VEDA_OSPECIALRW(rs1, rd) = {
+function clause execute VEDA_OSPECIALRW(scr, rs1, rd) = {
   if cur_privilege != Machine then Illegal_Instruction()
   else {
     let rdno = vcapidx_to_vcapno(rd);
@@ -523,17 +538,35 @@ function clause execute VEDA_OSPECIALRW(rs1, rd) = {
     // Real CHERI's own CSpecialRW semantics, unabridged: cd receives the
     // SCR's OLD value first, THEN the SCR is overwritten with cs1 -- a
     // real atomic read-then-write, not two independent operations (this
-    // matters if rs1 == rd: the old ODA value must still be correctly
-    // captured before it's overwritten).
-    let old_oda = veda_oda;
-    let old_tag = veda_oda_tag;
-    C(rdno) = old_oda;
-    CTag(rdno) = old_tag;
-    veda_oda = C(rs1no);
-    veda_oda_tag = CTag(rs1no);
+    // matters if rs1 == rd: the old SCR value must still be correctly
+    // captured before it's overwritten). Identical discipline for both
+    // real SCRs -- only which register pair is touched differs.
+    match scr {
+      VEDA_SCR_ODA => {
+        let old_oda = veda_oda;
+        let old_tag = veda_oda_tag;
+        C(rdno) = old_oda;
+        CTag(rdno) = old_tag;
+        veda_oda = C(rs1no);
+        veda_oda_tag = CTag(rs1no);
+      },
+      VEDA_SCR_TSC => {
+        let old_tsc = veda_tsc;
+        let old_tag = veda_tsc_tag;
+        C(rdno) = old_tsc;
+        CTag(rdno) = old_tag;
+        veda_tsc = C(rs1no);
+        veda_tsc_tag = CTag(rs1no);
+      },
+    };
     RETIRE_SUCCESS
   }
 }
 
-mapping clause assembly = VEDA_OSPECIALRW(rs1, rd)
-  <-> "ospecialrw" ^ spc() ^ vcap_name(encdec_vcap(rd)) ^ sep() ^ vcap_name(encdec_vcap(rs1))
+mapping veda_scr_name : veda_scr <-> string = {
+  VEDA_SCR_ODA <-> "oda",
+  VEDA_SCR_TSC <-> "tsc",
+}
+
+mapping clause assembly = VEDA_OSPECIALRW(scr, rs1, rd)
+  <-> "ospecialrw" ^ spc() ^ vcap_name(encdec_vcap(rd)) ^ sep() ^ veda_scr_name(scr) ^ sep() ^ vcap_name(encdec_vcap(rs1))
