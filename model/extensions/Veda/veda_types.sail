@@ -69,6 +69,19 @@ struct capability = {
 // otype sentinel, VEDA_CORE_SPEC.md Section 2: all-ones = UNSEALED.
 let UNSEALED_OTYPE : bits(16) = 0xFFFF
 
+// Minimal OS kernel Milestone B (MINIMAL_OS_KERNEL_DESIGN.md): the reserved
+// "sentry" otype, term-for-term the proportional analog of real CHERI's own
+// `2^XLEN-2` (CHERI ISA spec Table 3.2, p.79, immediately below its own
+// `2^XLEN-1` = unsealed entry) -- a capability sealed with this otype is a
+// hardware-minted sentry (VEDA_CSEALENTRY), verifiable by VEDA_OCRETURN with
+// a single capability operand instead of CSeal/CUnseal's general two-operand
+// type-authority check. Trustworthy only because VEDA_CSEAL's own
+// authorization (veda_cap_insts.sail) is hardened to refuse this value as a
+// requested otype, exactly mirroring real CSeal's own `cursor <=
+// cap_max_otype` bound -- ordinary software-directed sealing can never
+// produce it, only VEDA_CSEALENTRY's own fixed-constant assignment can.
+let VEDA_OTYPE_SENTRY : bits(16) = 0xFFFE
+
 let zero_capability : capability = struct {
   Object_ID = zeros(),
   Base      = zeros(),

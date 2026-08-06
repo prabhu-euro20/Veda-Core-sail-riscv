@@ -259,11 +259,21 @@ function clause execute VEDA_CSEAL(rs2, rs1, rd) = {
   let cs2 = C(cs2idx);
   // Authorization: cs2 must be a live, unsealed, Permit_Seal-carrying
   // capability whose own Offset (the value about to become cs1's new
-  // otype) lies within cs2's own bounds and isn't the UNSEALED sentinel.
+  // otype) lies within cs2's own bounds and isn't a reserved sentinel.
+  // Minimal OS kernel Milestone B: the `!= VEDA_OTYPE_SENTRY` exclusion is
+  // the load-bearing security property for the whole sentry mechanism --
+  // real CHERI's own CSeal enforces the identical kind of bound
+  // (`cursor <= cap_max_otype`, CHERI ISA spec p.214) so that ordinary,
+  // software-directed sealing can never forge a hardware-reserved otype.
+  // Without this line, a capability sealed here with otype=0xFFFE would be
+  // indistinguishable from a genuine VEDA_CSEALENTRY-minted sentry to
+  // every downstream consumer (VEDA_OCRETURN), defeating the mechanism
+  // entirely.
   let authorized : bool =
     CTag(cs2idx) & not(isSealedCap(cs2)) & permBit(cs2.Perms, PERM_SEAL)
     & (unsigned(cs2.Offset) < unsigned(cs2.Length))
-    & (cs2.Offset != UNSEALED_OTYPE);
+    & (cs2.Offset != UNSEALED_OTYPE)
+    & (cs2.Offset != VEDA_OTYPE_SENTRY);
   // An already-untagged or already-sealed cs1 can't be (re-)sealed --
   // "if cs1 was already sealed" from the spec text, plus the same
   // untagged-source-can't-produce-a-valid-result reasoning already
@@ -318,6 +328,57 @@ mapping clause assembly = VEDA_CSEAL(rs2, rs1, rd)
 
 mapping clause assembly = VEDA_CUNSEAL(rs2, rs1, rd)
   <-> "cunseal" ^ spc() ^ vcap_name(encdec_vcap(rd)) ^ sep() ^ vcap_name(encdec_vcap(rs1)) ^ sep() ^ vcap_name(encdec_vcap(rs2))
+
+// CSealEntry (minimal OS kernel Milestone B, MINIMAL_OS_KERNEL_DESIGN.md):
+// term-for-term adaptation of real CHERI's own CSealEntry (CHERI ISA spec
+// p.215, `7.4 CHERI-RISC-V INSTRUCTIONS: CSealEntry`, read in full): cd =
+// cs1 sealed with the fixed VEDA_OTYPE_SENTRY constant -- no authorizing
+// capability operand at all, unlike CSeal/CUnseal above, matching the real
+// spec's own description of sentry-minting as "an ambient monotonic
+// action, requiring no additional permission than to have a capability
+// bearing Permit_Execute" (p.101). Perms (including Permit_Execute) are
+// carried through unchanged, neither stripped nor added -- whoever mints a
+// sentry is responsible for minting it from an already-executable
+// capability, since VEDA_OCRETURN (below) is what actually enforces
+// Permit_Execute, at the point of use, exactly matching real CHERI's own
+// division of labor between CSealEntry and CJALR.
+union clause instruction = VEDA_CSEALENTRY : (vcapidx, vcapidx)
+
+// funct7 = 0010101, the next free Custom-2/funct3=001 slot (verified by
+// grep against every existing user of this space before picking it: OCA=
+// 0001010, CSeal=0010000, CUnseal=0010001, OCInvoke=0010010, OSpecialRW=
+// 0010011, OCJALR=0010100). rs2 is hardwired to all-zero, the same
+// established convention OSpecialRW's own unused operand slot already
+// uses, since CSealEntry takes only one source capability operand.
+mapping clause encdec = VEDA_CSEALENTRY(rs1, rd)
+  <-> 0b0010101 @ 0b00000 @ 0b0 @ encdec_vcap(rs1) @ 0b001 @ 0b0 @ encdec_vcap(rd) @ 0b1011011
+  when currentlyEnabled(Ext_Veda)
+
+function clause execute VEDA_CSEALENTRY(rs1, rd) = {
+  let cs1idx = vcapidx_to_vcapno(rs1);
+  let cs1 = C(cs1idx);
+  // An already-sealed or untagged cs1 can't produce a valid sentry -- the
+  // same "untagged/already-sealed source can't produce a valid result"
+  // reasoning CSeal above already applies, mirroring real CSealEntry's own
+  // `clearTagIfSealed` step.
+  let ok : bool = CTag(cs1idx) & not(isSealedCap(cs1));
+  let new_cap : capability = struct {
+    Object_ID = cs1.Object_ID,
+    Base      = cs1.Base,
+    Length    = cs1.Length,
+    Offset    = cs1.Offset,
+    Perms     = cs1.Perms,
+    otype     = VEDA_OTYPE_SENTRY,
+    Reserved  = cs1.Reserved,
+  };
+  let rdno = vcapidx_to_vcapno(rd);
+  wC(rdno, new_cap);
+  wCTag(rdno, ok);
+  RETIRE_SUCCESS
+}
+
+mapping clause assembly = VEDA_CSEALENTRY(rs1, rd)
+  <-> "csealentry" ^ spc() ^ vcap_name(encdec_vcap(rd)) ^ sep() ^ vcap_name(encdec_vcap(rs1))
 
 // OCInvoke (VEDA_CORE_SPEC.md Section 6 item 7, now closed): Veda-Core's
 // term-for-term adaptation of CHERI's real CInvoke (verified, CHERI ISA
@@ -496,12 +557,88 @@ function clause execute VEDA_OCJALR(rs2, rs1) = {
 mapping clause assembly = VEDA_OCJALR(rs2, rs1)
   <-> "ocjalr" ^ spc() ^ vcap_name(encdec_vcap(rs1)) ^ sep() ^ vcap_name(encdec_vcap(rs2))
 
+// OCRETURN (minimal OS kernel Milestone B, MINIMAL_OS_KERNEL_DESIGN.md):
+// the actual cheap, cross-compartment-boundary-crossing counterpart to
+// OCJALR's own verify-and-consume-only, always-two-operand design above.
+// Deliberately a NEW opcode rather than a sentry branch folded into
+// OCJALR: OCJALR's own `rs2` is a fixed encoding field (folding a branch
+// in would either still require `rs2` to be supplied unused, defeating
+// the single-operand premise, or make one static encoding mean two
+// different things depending on runtime capability contents -- this
+// project's own convention already gives each distinct security-relevant
+// behavior its own funct7, e.g. OCA/CSetBounds/CSetBoundsExact, rather
+// than overloading one opcode's meaning by capability content). OCJALR
+// itself is completely unmodified by this instruction's addition --
+// direct, load-bearing preservation of RTL Milestone 22's own already-
+// shipped, already-tested "OCJALR cannot cross a compartment boundary"
+// finding.
+//
+// `cs1` must be a genuine VEDA_CSEALENTRY-minted sentry (otype ==
+// VEDA_OTYPE_SENTRY, a value ordinary CSeal is now hardware-blocked from
+// ever producing, per the hardened VEDA_CSEAL authorization above) --
+// verified with exactly the same three checks OCJALR's own cs1-side
+// already performs (tag, seal-validity, Permit_Execute), reusing the
+// identical cause codes, but with NO second, type-authority capability
+// operand at all: a sentry's own otype is self-authenticating, unlike an
+// arbitrary CSeal otype which always needs an explicit CUnseal-style
+// authority to vouch for it. Permit_Invoke is deliberately NOT checked --
+// matches real CHERI's own sentry/CJALR mechanism exactly (invoke-
+// permission is CInvoke-specific; sentries are a lighter-weight,
+// separate mechanism with no data-capability handoff).
+//
+// On success, narrows `veda_pcc_base`/`veda_pcc_length` to cs1's own
+// Base/Length -- the actual compartment-boundary-crossing side effect,
+// mirroring OCInvoke's own identical assignment above verbatim, in the
+// same narrow-then-jump order OCInvoke already established (not
+// re-derived fresh) -- before computing `target` and jumping. `IDC`/c15
+// is deliberately left untouched (not cleared): real CJALR never touches
+// IDC either (only CInvoke does), and OCInvoke's own code above already
+// treats "install data-capability context" and "narrow PCC" as two
+// independently-triggered effects, so OCRETURN adopting only the PCC
+// half reuses a split this codebase already makes internally rather than
+// inventing a new one. Security property, stated explicitly: OCRETURN's
+// guarantee is identical in kind to OCInvoke's -- bounded by whatever
+// capability the caller already legitimately possesses (valid tag,
+// genuine Permit_Execute, and an otype only ever produced by minting,
+// never by forgery) -- it is a cheaper mechanism for exercising
+// pre-existing authority, not a new source of authority.
+union clause instruction = VEDA_OCRETURN : (vcapidx)
+
+// funct7 = 0010110, the next free Custom-2/funct3=001 slot after
+// CSealEntry's own 0010101 above (verified by grep against every existing
+// user of this space before picking it). rs2 and rd are both hardwired to
+// all-zero -- OCRETURN takes exactly one source capability operand and,
+// like OCInvoke/OCJALR above, its real output is a PC redirect (plus the
+// PCC-narrowing side effect), not a register value.
+mapping clause encdec = VEDA_OCRETURN(rs1)
+  <-> 0b0010110 @ 0b00000 @ 0b0 @ encdec_vcap(rs1) @ 0b001 @ 0b0 @ 0b0000 @ 0b1011011
+  when currentlyEnabled(Ext_Veda)
+
+function clause execute VEDA_OCRETURN(rs1) = {
+  let cs1idx = vcapidx_to_vcapno(rs1);
+  let cs1 = C(cs1idx);
+  if not(CTag(cs1idx)) then veda_trap(rs1, VEDA_CAUSE_TAG_VIOLATION)
+  else if not(isSealedCap(cs1)) then veda_trap(rs1, VEDA_CAUSE_SEAL_VIOLATION)
+  else if cs1.otype != VEDA_OTYPE_SENTRY then veda_trap(rs1, VEDA_CAUSE_SEAL_VIOLATION)
+  else if not(permBit(cs1.Perms, PERM_EXECUTE)) then veda_trap(rs1, VEDA_CAUSE_PERM_EXECUTE_VIOLATION)
+  else {
+    veda_pcc_base = cs1.Base;
+    veda_pcc_length = cs1.Length;
+    let target : xlenbits = zero_extend(cs1.Base) + zero_extend(cs1.Offset);
+    jump_to([target with 0 = bitzero])
+  }
+}
+
+mapping clause assembly = VEDA_OCRETURN(rs1)
+  <-> "ocreturn" ^ spc() ^ vcap_name(encdec_vcap(rs1))
+
 // OSpecialRW (VEDA_CORE_SPEC.md Section 6 item 8, formerly NEXT_STEPS_
 // ROADMAP.md §2.5): term-for-term adaptation of real CHERI's own
-// CSpecialRW (CHERI ISA spec §4.3.6/p.235), reading and writing
-// Veda-Core's own single Special Capability Register, the ODA (Object
-// Descriptor Authority, veda_regs.sail). funct7 = 0010011, the next
-// unused Custom-2 slot after OCInvoke (0010010). Real CHERI's own
+// CSpecialRW (CHERI ISA spec §4.3.6/p.235), reading and writing one of
+// Veda-Core's own Special Capability Registers -- the ODA (Object
+// Descriptor Authority, Milestone 11) or, as of Minimal OS kernel
+// Milestone A, the TSC (Trusted Stack Capability). funct7 = 0010011, the
+// next unused Custom-2 slot after OCInvoke (0010010). Real CHERI's own
 // access rule for SCR writes (Table 4.3's "ASR" column): the current
 // mode must be permitted AND PCC.perms must grant
 // PERMIT_ACCESS_SYSTEM_REGISTERS. Veda-Core has no PCC (Milestone 10's
