@@ -472,6 +472,28 @@ function clause execute VEDA_OCINVOKE(rs2, rs1) = {
     // Perms-on-PCC deliberately deferred, no real consumer exists yet).
     veda_pcc_base = cs1.Base;
     veda_pcc_length = cs1.Length;
+    // SSC (Stack-Spill Capability, see veda_types.sail's veda_scr enum):
+    // clear (untag) on every successful invoke, unconditionally -- a
+    // hardware guarantee, not a software discipline, the identical real
+    // lesson Milestone 17/OCJALR already taught this project once
+    // (STACK_FRAME_CALL_RETURN_ANALYSIS.md). Without this, the entered
+    // compartment would silently inherit full OCL.D/OCS.D read/write
+    // access to whatever stack region the invoking context had bound --
+    // a real confidentiality/integrity leak an independent design review
+    // found before any code was written: applying ODA/TSC's own
+    // "untouched by OCInvoke" convention to SSC would have left the
+    // caller's entire stack region reachable from the callee. Clearing
+    // only the Tag (not zeroing the value) matches this project's own
+    // established convention (Milestone 7's tag-clearing-on-plain-write)
+    // -- any OCL.D/OCS.D against an untagged capability already hard-traps
+    // regardless of the stale bits underneath. The entered compartment is
+    // responsible for establishing its own SSC via an explicit
+    // OSpecialRW, the identical already-established pattern ODA/TSC
+    // themselves use -- no new operand, no encoding change, symmetric
+    // with the identical clear this milestone also adds to OCRETURN
+    // below (return is a real compartment-boundary crossing too; the
+    // same leak class applies in that direction as well).
+    veda_ssc_tag = false;
     let target : xlenbits = zero_extend(cs1.Base) + zero_extend(cs1.Offset);
     jump_to([target with 0 = bitzero])
   }
@@ -624,6 +646,12 @@ function clause execute VEDA_OCRETURN(rs1) = {
   else {
     veda_pcc_base = cs1.Base;
     veda_pcc_length = cs1.Length;
+    // SSC: clear on every successful return too, the identical reason and
+    // identical mechanism as VEDA_OCINVOKE above -- OCRETURN is a real,
+    // general compartment-boundary crossing (not only used inside the
+    // scheduler's own switcher pattern), so the same hardware guarantee
+    // must hold unconditionally here as well, not just on the call side.
+    veda_ssc_tag = false;
     let target : xlenbits = zero_extend(cs1.Base) + zero_extend(cs1.Offset);
     jump_to([target with 0 = bitzero])
   }
@@ -661,6 +689,7 @@ union clause instruction = VEDA_OSPECIALRW : (veda_scr, vcapidx, vcapidx)
 mapping encdec_veda_scr : veda_scr <-> bits(5) = {
   VEDA_SCR_ODA <-> 0b00000,
   VEDA_SCR_TSC <-> 0b00001,
+  VEDA_SCR_SSC <-> 0b00010,
 }
 
 mapping clause encdec = VEDA_OSPECIALRW(scr, rs1, rd)
@@ -695,6 +724,14 @@ function clause execute VEDA_OSPECIALRW(scr, rs1, rd) = {
         veda_tsc = C(rs1no);
         veda_tsc_tag = CTag(rs1no);
       },
+      VEDA_SCR_SSC => {
+        let old_ssc = veda_ssc;
+        let old_tag = veda_ssc_tag;
+        C(rdno) = old_ssc;
+        CTag(rdno) = old_tag;
+        veda_ssc = C(rs1no);
+        veda_ssc_tag = CTag(rs1no);
+      },
     };
     RETIRE_SUCCESS
   }
@@ -703,6 +740,7 @@ function clause execute VEDA_OSPECIALRW(scr, rs1, rd) = {
 mapping veda_scr_name : veda_scr <-> string = {
   VEDA_SCR_ODA <-> "oda",
   VEDA_SCR_TSC <-> "tsc",
+  VEDA_SCR_SSC <-> "ssc",
 }
 
 mapping clause assembly = VEDA_OSPECIALRW(scr, rs1, rd)

@@ -234,4 +234,17 @@ enum veda_capquery = {VEDA_CGETBASE, VEDA_CGETLEN, VEDA_CGETPERM, VEDA_CGETTAG, 
 // continues to mean exactly what it always meant, a real, verified
 // backward-compatibility property, not just an assumption), 1 = TSC (the
 // new Trusted Stack Capability this milestone adds).
-enum veda_scr = {VEDA_SCR_ODA, VEDA_SCR_TSC}
+//
+// SSC (Stack-Spill Capability): a third selector, added to let ordinary
+// compiled C's ABI-mandated callee-saved-register spills/reloads route
+// through real OCL.D/OCS.D checks instead of raw sd/ld (which
+// Milestone 19's purecap rule unconditionally traps inside a live
+// compartment). Deliberately NOT persistent-and-OCInvoke-transparent like
+// ODA/TSC above -- verified directly against VEDA_OCINVOKE's own execute
+// clause that it touches only veda_pcc_base/_length and IDC today, so an
+// SSC following the same "untouched by OCInvoke" pattern would let a
+// callee compartment silently inherit full read/write access to the
+// caller's entire stack region, a real leak bigger than the purecap trap
+// this exists to safely replace. VEDA_OCINVOKE itself is extended (see
+// its own execute clause) to save/swap SSC on every invoke instead.
+enum veda_scr = {VEDA_SCR_ODA, VEDA_SCR_TSC, VEDA_SCR_SSC}

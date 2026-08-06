@@ -58,6 +58,24 @@ register veda_oda_tag : bool
 register veda_tsc : capability
 register veda_tsc_tag : bool
 
+// SSC (Stack-Spill Capability) -- Veda-Core's own third Special Capability
+// Register, added to let ordinary compiled C's ABI-mandated callee-saved
+// -register spills/reloads route through real OCL.D/OCS.D checks instead
+// of raw sd/ld (which Milestone 19's purecap rule unconditionally traps
+// inside a live compartment -- TOOLCHAIN_MILESTONE_10_RESULTS.md's own
+// major finding). Deliberately NOT persistent-and-OCInvoke/OCRETURN
+// -transparent like veda_oda/veda_tsc above: VEDA_OCINVOKE and
+// VEDA_OCRETURN (veda_cap_insts.sail) both clear (untag) this register on
+// every successful compartment-boundary crossing -- a real, necessary
+// asymmetry from ODA/TSC found by an independent design review before any
+// code was written (an SSC following ODA/TSC's own "untouched by
+// OCInvoke" convention would let a callee silently inherit full
+// read/write access to the caller's entire stack region). The entered
+// compartment re-establishes its own SSC via an explicit OSpecialRW, the
+// identical already-established pattern ODA/TSC themselves use.
+register veda_ssc : capability
+register veda_ssc_tag : bool
+
 // Milestone 14 (PCC_COMPARTMENT_DESIGN.md): the currently-active
 // `OCInvoke`-entered compartment's own bounds, and their saved copy
 // across a trap -- Base(32)/Length(16), matching the ODT entry's own
