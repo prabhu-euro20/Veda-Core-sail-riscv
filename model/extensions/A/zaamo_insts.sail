@@ -82,11 +82,15 @@ function clause execute AMO(op, aq, rl, rs2, rs1, width, rd) = {
   };
 
   if not(is_aligned_addr(vaddr, width)) then {
-    let exc : ExceptionType = match plat_misaligned_access.amo {
-      AccessFault        => E_SAMO_Access_Fault(),
-      AlignmentException => E_SAMO_Addr_Align(),
+    // Check if the model is configured to raise an exception based on
+    // the misaligned virtual address.
+    match plat_misaligned_exception(access, false) {
+      Some(AccessFault)        => return memory_exception(vaddr, E_SAMO_Access_Fault()),
+      Some(AlignmentException) => return memory_exception(vaddr, E_SAMO_Addr_Align()),
+      // No exception yet, but we may still get one based on the
+      // physical address after address translation and checking PMAs.
+      None()                   => (),
     };
-    return memory_exception(vaddr, exc)
   };
 
   let (addr, pbmt) : (physaddr, page_based_mem_type) = match translateAddr(vaddr, access) {
@@ -95,9 +99,17 @@ function clause execute AMO(op, aq, rl, rs2, rs1, width, rd) = {
   };
 
   let loaded : bits('width * 8) = match mem_write_ea(addr, width, access, pbmt, aq & rl, rl, true) {
-    Err(e) => return memory_exception(vaddr, e),
+    Err(exc_addr, e) => {
+      // AMOs should not get split.
+      assert(exc_addr == addr);
+      return memory_exception(vaddr, e)
+    },
     Ok(_)  => match mem_read(access, pbmt, addr, width, aq, aq & rl, true) {
-      Err(e)     => return memory_exception(vaddr, e),
+      Err(exc_addr, e) => {
+        // AMOs should not get split.
+        assert(exc_addr == addr);
+        return memory_exception(vaddr, e)
+      },
       Ok(loaded) => loaded,
     },
   };
@@ -139,7 +151,11 @@ function clause execute AMO(op, aq, rl, rs2, rs1, width, rd) = {
       RETIRE_SUCCESS
     },
     Ok(false) => internal_error(__FILE__, __LINE__, "AMO got false from mem_write_value"),
-    Err(e)    => memory_exception(vaddr, e),
+    Err(exc_addr, e) => {
+      // AMOs should not get split.
+      assert(exc_addr == addr);
+      memory_exception(vaddr, e)
+    }
   }
 }
 

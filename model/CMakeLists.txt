@@ -24,6 +24,12 @@ set(sail_common
     --memo-z3-path "${CMAKE_CURRENT_BINARY_DIR}/sail_smt_cache"
 )
 
+# Mirroring Sail's PRINT_EFFECTS flag
+option(PRINT_EFFECTS "Pass PRINT_EFFECTS to Sail (used in Lean and Rocq backends)" OFF)
+if(PRINT_EFFECTS)
+    list(APPEND sail_common -D PRINT_EFFECTS)
+endif()
+
 set(project_file "riscv.sail_project")
 
 # Reconfigure if the project file changes.
@@ -473,6 +479,9 @@ foreach (xlen IN ITEMS 32 64)
 
     add_custom_target(generated_lean_${arch} DEPENDS "Lean_${arch_uppercase}/Lean${arch_uppercase}.lean")
     add_custom_target(generated_lean_executable_${arch} DEPENDS "Lean_${arch_uppercase}_executable/Lean${arch_uppercase}Executable.lean")
+
+    # Make the directories with executable definitions known to the lean_emulator build.
+    set(lean_${arch}_executable_dir "${CMAKE_CURRENT_BINARY_DIR}/Lean_${arch_uppercase}_executable" PARENT_SCOPE)
 
     ############# Lem #############
 

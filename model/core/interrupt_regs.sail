@@ -53,14 +53,20 @@ private function legalize_mie(o : Minterrupts, v : xlenbits) -> Minterrupts = {
   ]
 }
 
-private function legalize_mideleg(o : Minterrupts, v : xlenbits) -> Minterrupts = {
+private function legalize_mideleg(_o : Minterrupts, v : xlenbits) -> Minterrupts = {
   let v = Mk_Minterrupts(v & plat_mideleg_delegatable_bits);
-  // M-mode interrupt delegation bits "should" be hardwired to 0.
-  [o with
+  // Using `v` allows bits to be set for interrupts designated for
+  // platform use. This is useful for bit-matching test frameworks
+  // like ACT, but these bits do not affect the model as those
+  // interrupts are not known. (Even if the corresponding bits are set
+  // in `mip` and `mie` (see `sys/sys_control.sail:getPendingSet()`,
+  // they will not be used (see
+  // `sys/sys_control.sail:findPendingInterrupt()`).
+  //
+  // Note also that M-mode interrupts (MTI, MSI, MEI) can be delegated;
+  // see https://github.com/riscv/riscv-isa-manual/issues/3162
+  [v with
     LCOFI = if currentlyEnabled(Ext_Sscofpmf) then v[LCOFI] else 0b0,
-    MEI   = 0b0,
-    MTI   = 0b0,
-    MSI   = 0b0,
     SEI   = if currentlyEnabled(Ext_S) then v[SEI] else 0b0,
     STI   = if currentlyEnabled(Ext_S) then v[STI] else 0b0,
     SSI   = if currentlyEnabled(Ext_S) then v[SSI] else 0b0,
@@ -68,6 +74,9 @@ private function legalize_mideleg(o : Minterrupts, v : xlenbits) -> Minterrupts 
 }
 
 bitfield Medeleg : bits(64) = {
+  Hardware_Error    : 19,
+  Software_Check    : 18,
+  Double_Trap       : 16,
   SAMO_Page_Fault   : 15,
   Load_Page_Fault   : 13,
   Fetch_Page_Fault  : 12,
@@ -85,8 +94,15 @@ bitfield Medeleg : bits(64) = {
 }
 
 private function legalize_medeleg(_o : Medeleg, v : bits(64)) -> Medeleg = {
-  // M-EnvCalls delegation is not supported
-  [Mk_Medeleg(v & plat_medeleg_delegatable_bits) with MEnvCall = 0b0]
+  // Using `v` allows bits for custom exceptions to be set. This is
+  // useful for bit-matching test frameworks like ACT, but these bits
+  // do not affect the model as those exceptions are not known (see
+  // `sys/sys_control.sail:exception_delegatee()`).
+  [Mk_Medeleg(v & plat_medeleg_delegatable_bits) with
+    // M-EnvCalls and DoubleTrap cannot be delegated.
+    Double_Trap        = 0b0,
+    MEnvCall           = 0b0,
+  ]
 }
 
 // Note that mip's MEIP and SEIP had special handling. MEIP is always
@@ -121,7 +137,7 @@ mapping clause csr_name_map = 0x303  <-> "mideleg"
 function clause is_CSR_accessible(0x304, _, _) = true // mie
 function clause is_CSR_accessible(0x344, _, _) = true // mip
 function clause is_CSR_accessible(0x302, _, _) = currentlyEnabled(Ext_S) // medeleg
-function clause is_CSR_accessible(0x312, _, _) = currentlyEnabled(Ext_S) & xlen == 32 // medelegh
+function clause is_CSR_accessible(0x312, _, _) = delegh_csrs_are_defined & currentlyEnabled(Ext_S) & xlen == 32 // medelegh
 function clause is_CSR_accessible(0x303, _, _) = currentlyEnabled(Ext_S) // mideleg
 
 enum XipReadType = {
@@ -154,11 +170,15 @@ function clause write_CSR(0x303, value) = { mideleg = legalize_mideleg(mideleg, 
 
 bitfield Sinterrupts : xlenbits = {
   LCOFI : 13, // local-counter-overflow interrupts
-  SEI   : 9,  // external interrupts
 
-  STI   : 5,  // timers interrupts
+  MEI   : 11, // external interrupts
+  SEI   : 9,
 
-  SSI   : 1,  // software interrupts
+  MTI   : 7,  // timers interrupts
+  STI   : 5,
+
+  MSI   : 3,  // software interrupts
+  SSI   : 1,
 }
 
 // sip
@@ -168,8 +188,11 @@ private function lower_mip(m : Minterrupts, d : Minterrupts) -> Sinterrupts = {
 
   [s with
     LCOFI = m[LCOFI] & d[LCOFI],
+    MEI = m[MEI] & d[MEI],
     SEI = m[SEI] & d[SEI],
+    MTI = m[MTI] & d[MTI],
     STI = m[STI] & d[STI],
+    MSI = m[MSI] & d[MSI],
     SSI = m[SSI] & d[SSI],
   ]
 }
@@ -180,8 +203,11 @@ private function lower_mie(m : Minterrupts, d : Minterrupts) -> Sinterrupts = {
 
   [s with
     LCOFI = m[LCOFI] & d[LCOFI],
+    MEI = m[MEI] & d[MEI],
     SEI = m[SEI] & d[SEI],
+    MTI = m[MTI] & d[MTI],
     STI = m[STI] & d[STI],
+    MSI = m[MSI] & d[MSI],
     SSI = m[SSI] & d[SSI],
   ]
 }
@@ -214,8 +240,11 @@ function clause write_CSR(0x144, value) = { write_sip(value); Ok(read_sip(Includ
 // Returns the new value of mie from the previous mie (o) and the written sie (s) as delegated by mideleg (d).
 private function lift_sie(o : Minterrupts, d : Minterrupts, s : Sinterrupts) -> Minterrupts = {
   [o with
+    MEI   = if d[MEI] == 0b1 then s[MEI] else o[MEI],
     SEI   = if d[SEI] == 0b1 then s[SEI] else o[SEI],
+    MTI   = if d[MTI] == 0b1 then s[MTI] else o[MTI],
     STI   = if d[STI] == 0b1 then s[STI] else o[STI],
+    MSI   = if d[MSI] == 0b1 then s[MSI] else o[MSI],
     SSI   = if d[SSI] == 0b1 then s[SSI] else o[SSI],
     LCOFI = if d[LCOFI] == 0b1 then s[LCOFI] else o[LCOFI],
   ]

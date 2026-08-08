@@ -70,6 +70,8 @@ function check_CSR_result(csr : csreg, p : Privilege, access_type : CSRAccessTyp
 // it occurred, returns the privilege at which it should be handled.
 function exception_delegatee(e : ExceptionType, p : Privilege) -> Privilege = {
   let idx = unsigned(exceptionType_bits(e));
+  // Note that `medeleg` can have bits set for custom exceptions (see
+  // `core/interrupt_regs.sail:legalize_medeleg()`).
   let super = bit_to_bool(medeleg.bits[idx]);
   // TODO: check VS/VU-mode if hypervisor extension enabled
   let deleg = if currentlyEnabled(Ext_S) & super then Supervisor else Machine;
@@ -103,14 +105,19 @@ function findPendingInterrupt(ip : xlenbits) -> option(InterruptType) = {
 //
 // TODO: check hip/hie if hypervisor enabled.
 function getPendingSet(priv : Privilege) -> option((xlenbits, Privilege)) = {
-  // mideleg can only be non-zero if we support Supervisor mode.
-  assert(currentlyEnabled(Ext_S) | mideleg.bits == zeros());
+  // If supervisor mode is not currently enabled then ignore mideleg
+  // (it does not exist).
+  let mideleg_bits = if currentlyEnabled(Ext_S) then mideleg.bits else zeros();
 
   // Read mip with the external platform interrupts ORed in.
   let mip_bits = read_mip(IncludePlatformInterrupts).bits;
 
-  let pending_m = mip_bits & mie.bits & ~(mideleg.bits);
-  let pending_s = mip_bits & mie.bits & mideleg.bits;
+  // Note that `mideleg` can have bits set for interrupts designated
+  // for platform use (see
+  // `core/interrupt_regs.sail:legalize_mideleg()`), but those
+  // interrupts are not known in `findPendingInterrupt()` above.
+  let pending_m = mip_bits & mie.bits & ~(mideleg_bits);
+  let pending_s = mip_bits & mie.bits & mideleg_bits;
 
   let mIE = (priv == Machine    & mstatus[MIE] == 0b1) | priv == Supervisor | priv == User;
   let sIE = (priv == Supervisor & mstatus[SIE] == 0b1) | priv == User;
@@ -406,7 +413,7 @@ function reset_sys() -> unit = {
 
 // memory access exceptions, defined here for use by the platform model.
 
-type MemoryOpResult('a : Type) = result('a, ExceptionType)
+type MemoryOpResult('a : Type) = result('a, (physaddr, ExceptionType))
 
 val MemoryOpResult_add_meta : forall ('t : Type). (MemoryOpResult('t), mem_meta) -> MemoryOpResult(('t, mem_meta))
 function MemoryOpResult_add_meta(r, m) = match r {

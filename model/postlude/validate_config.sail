@@ -292,6 +292,7 @@ private function check_pma_region(region : PMA_Region) -> bool = {
 }
 
 private struct pma_check_opts = {
+  zama16b  : bool,
   ziccamoa : bool,
   ziccamoc : bool,
   ziccif   : bool,
@@ -314,12 +315,26 @@ private function check_pma_regions(regions : list(PMA_Region), prev_base : bits(
                       " is not above the end of the previous region starting at " ^
                       bits_str(prev_base) ^ " and ending at " ^ bits_str(prev_base + prev_size) ^ ".");
         return false;
+      } else if unsigned(region.base) + unsigned(region.size) > 2 ^ physaddr_bits then {
+        print_endline("Memory region starting at " ^ bits_str(region.base) ^
+                      " ends at " ^ bits_str(region.base + region.size) ^
+                      " which is above the representable limit of the physical address bit size (i.e. " ^
+                      dec_str(physaddr_bits) ^ " from `memory.physaddr_bits`).");
+        return false;
       };
 
       if not(check_pma_region(region)) then return false;
 
       let attributes = region.attributes;
       if attributes.mem_type == MainMemory & attributes.cacheable & attributes.coherent then {
+        let mag = attributes.misaligned_atomicity_granule_size_exp;
+        if check_opts.zama16b & mag < 4 then {
+          print_endline("Main memory region starting at " ^ bits_str(region.base) ^ " is coherent and cacheable with " ^
+                        (if mag == 0 then "no specified misaligned atomicity granule PMA"
+                         else "a misaligned atomicity granule size of 2^" ^ dec_str(mag)) ^
+                        ", but Zama16b is enabled which requires granule size of at least 2^4 bytes.");
+          return false;
+        };
         if check_opts.ziccamoa & attributes.atomic_support < AMOArithmetic then {
           print_endline("Main memory region starting at " ^ bits_str(region.base) ^ " is coherent and cacheable with " ^ atomic_support_str(attributes.atomic_support) ^ " atomicity support, but Ziccamoa is enabled which requires AMOArithmetic support.");
           return false;
@@ -388,6 +403,7 @@ private function check_mem_layout() -> bool =
     false
   } else {
     let check_opts : pma_check_opts = struct {
+      zama16b  = config extensions.Zama16b.supported,
       ziccamoa = config extensions.Ziccamoa.supported,
       ziccamoc = config extensions.Ziccamoc.supported,
       ziccif   = config extensions.Ziccif.supported,
@@ -550,6 +566,30 @@ private function check_extension_param_constraints() -> bool = {
       print_endline("The Zicclsm extension is enabled, but misaligned vector loads/stores raise access faults before address translation (as per `memory.misaligned.exceptions.vector`); Zicclsm requires no exceptions or only misaligned exceptions for such accesses.");
     };
   };
+  if (config extensions.S.supported : bool) then {
+    let medelegation = Mk_Medeleg(config base.medeleg.delegatable_bits);
+    if medelegation[Double_Trap] != 0b0 then {
+      valid = false;
+      print_endline("Bit 16 (Double Trap) in `base.medeleg.delegatable_bits` is set; Double Trap cannot be delegated.");
+    };
+    if medelegation[MEnvCall] != 0b0 then {
+      valid = false;
+      print_endline("Bit 11 (Environment call from M-mode) in `base.medeleg.delegatable_bits` is set; this environment call cannot be delegated.");
+    };
+    let reserved_exception_mask : bits(64) = zero_extend(0x0_FFFF_00F2_4400);
+    if (medelegation.bits & reserved_exception_mask) != zeros() then {
+      valid = false;
+      print_endline("Bits for reserved exceptions are set in `base.medeleg.delegatable_bits`.");
+    };
+
+    let midelegation = Mk_Minterrupts(config base.mideleg.delegatable_bits);
+    // Ignore bits set for interrupts designated for platform use.
+    let reserved_interrupt_mask : xlenbits = zero_extend(0xD555);
+    if (midelegation.bits & reserved_interrupt_mask) != zeros() then {
+      valid = false;
+      print_endline("Bits for reserved interrupts are set in `base.mideleg.delegatable_bits`.");
+    }
+  };
   valid
 }
 
@@ -614,10 +654,41 @@ private function check_mstatus_fields() -> bool = {
   valid
 }
 
+private function check_physaddr_bits() -> bool = {
+  let physaddr_bits_nat : nat = physaddr_bits;
+  if physaddr_bits_nat > 64 then {
+    print_endline("`memory.physaddr_bits` is " ^ dec_str(physaddr_bits) ^ " but cannot be greater than 64.");
+    false
+  } else if physaddr_bits_nat > 34 & xlen == 32 then {
+    print_endline("`memory.physaddr_bits` is " ^ dec_str(physaddr_bits) ^ " but cannot be greater than 34 for RV32.");
+    false
+  } else if physaddr_bits_nat > 32 & xlen == 32 & not(config extensions.Sv32.supported : bool) then {
+    print_endline("`memory.physaddr_bits` is " ^ dec_str(physaddr_bits) ^ " but Sv32 is disabled: values greater than 32 requires Sv32 to be enabled.");
+    false
+  } else if physaddr_bits_nat < 13 then {
+    print_endline("`memory.physaddr_bits` is " ^ dec_str(physaddr_bits) ^ " but values smaller than 13 are not supported.");
+    false
+  } else { true }
+}
+
+private function check_version_constraints() -> bool = {
+  var valid : bool = true;
+
+  // The internal variables are used here rather than the `config` constructs due to their non-trivial types.
+  if (sys_pmp_count > 16 & priv_isa_version < Privileged_ISA_1_12) then {
+    valid = false;
+    print_endline("More than 16 PMP registers are specified, but the privileged ISA version is set to " ^
+                  privileged_isa_version_name(priv_isa_version) ^ " which only allows 16 PMP registers.");
+  };
+
+  valid
+}
+
 function config_is_valid() -> bool = {
     check_privs()
   & check_tvecs()
   & check_mstatus_fields()
+  & check_physaddr_bits()
   & check_mmu_config()
   & check_mem_layout()
   & check_mmio_devices()
@@ -626,5 +697,6 @@ function config_is_valid() -> bool = {
   & check_pmp()
   & check_misc_extension_dependencies()
   & check_extension_param_constraints()
+  & check_version_constraints()
   & check_stateen_config()
 }

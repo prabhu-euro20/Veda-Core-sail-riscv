@@ -14,9 +14,9 @@ foreach(CONFIG__BASE__XLEN IN ITEMS 32 64)
             set(CONFIG_XLEN_IS_${CONFIG__BASE__XLEN} "true")
 
             if (${CONFIG__BASE__XLEN} EQUAL 32)
-              set(CONFIG_MIDELEG_DELEGATABLE_BITS_VALUE "0xFFFF_FFFF")
+              set(CONFIG_MIDELEG_DELEGATABLE_BITS_VALUE "0x0000_2222")
             else()
-              set(CONFIG_MIDELEG_DELEGATABLE_BITS_VALUE "0xFFFF_FFFF_FFFF_FFFF")
+              set(CONFIG_MIDELEG_DELEGATABLE_BITS_VALUE "0x0000_0000_0000_2222")
             endif()
 
             set(CONFIG_ELEN_IS_32 "false")
@@ -31,6 +31,12 @@ foreach(CONFIG__BASE__XLEN IN ITEMS 32 64)
             # Otherwise fallback to Float_double for ELEN=64.
             elseif(CONFIG_ELEN_IS_64 STREQUAL true)
               set(CONFIG__V__SUPPORT "Float_double")
+            endif()
+
+            if(CONFIG_XLEN_IS_32 STREQUAL true)
+                set(CONFIG__PHYSADDR__BITS 34)
+            elseif(CONFIG_XLEN_IS_64 STREQUAL true)
+                set(CONFIG__PHYSADDR__BITS 56)
             endif()
 
             configure_file(config.json.in ${CMAKE_CURRENT_BINARY_DIR}/${config_filename})

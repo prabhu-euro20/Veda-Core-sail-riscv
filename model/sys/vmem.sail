@@ -180,7 +180,8 @@ function pt_walk(
             PTE_Check_Success(ext_ptw) => {
               let ppn = if level > 0 then {
                 // NAPOT PTEs are currently reserved for level > 0.
-                if pte_ext[N] == 0b1 then return Err(PTW_Invalid_PTE(), ext_ptw);
+                if pte_ext[N] == 0b1 & pte_reserved_bits_must_be_zero
+                then return Err(PTW_Invalid_PTE(), ext_ptw);
 
                 // Compose final PA in superpage:
                 // Superpage PPN @ lower VPNs @ page-offset
@@ -244,7 +245,7 @@ function satp_to_ppn(satp_val) =
   if 'n == 32 then Mk_Satp32(satp_val)[PPN] else Mk_Satp64(satp_val)[PPN]
 
 // Compute address translation mode from SATP register
-private function translationMode(priv : Privilege) -> SATPMode = {
+function translationMode(priv : Privilege) -> SATPMode = {
   if priv == Machine then Bare
   else {
     let arch = architecture(Supervisor);
@@ -457,6 +458,11 @@ function translateAddr(
         // On RV64 paddr can be 34 or 56 bits, so we zero extend to 64.
         // On RV32 paddr can only be 34 bits. Sail knows this due to
         // the assertion above.
+        // High PPN bits above the implemented physical address width are
+        // deliberately not masked: "The algorithm does not admit the
+        // possibility of ignoring high-order PPN bits for implementations
+        // with narrower physical addresses." Such addresses instead fault
+        // at the PMA/PMP checks.
         Ok(Physaddr(zero_extend(paddr)), pbmt, ext_ptw)
       },
       Err(f, ext_ptw)  => Err(translationException(access, f), ext_ptw)

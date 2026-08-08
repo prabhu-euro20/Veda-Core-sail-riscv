@@ -1,17 +1,74 @@
 # Release notes for the next version
 
+# Release notes for version 0.13.1
+
+This is primarily a bug-fix release with fixes for the issues listed
+below. There are no changes to the configuration file, so the model
+configuration is fully compatible with that of version 0.13.
+
+- The command line interface has been updated:
+  - A new `--trace-pmp` option has been added to enable trace output
+    for PMP checks.
+
+- Important issues addressed and bugs fixed:
+  - https://github.com/riscv/sail-riscv/issues/1836 : machine mode interrupts in mip and mie were not delegated correctly to sip and sie
+  - https://github.com/riscv/sail-riscv/issues/1832 : Zama16b validation check should require at least 16 bytes, not exactly 16 bytes
+  - https://github.com/riscv/sail-riscv/issues/1829 : seed CSR OPST field contained random values
+
+# Release notes for version 0.13
+
+The main highlights of this release are the addition of the misaligned
+atomicity granule PMA, an [experimental RISC-V
+emulator](../lean_emulator/README.md) in Lean extracted from the Sail
+model, and experimental support for a [remote server endpoint for GDB
+and LLDB](../c_emulator/gdb/README.md).
+
+- The following extensions have been added:
+  - Zama16b
+
 - Updates to the [configuration file](../config/config.json.in):
   - The version of the privileged ISA specification for the model can
     be specified; see `base.privileged_isa_version`. Note that not
     all versions can be specified as yet, and not all version-affected
     functionality is implemented.
+  - The number of implemented physical address bits can be specified;
+    see `memory.physaddr_bits`.
   - Delegatable subsets of `medeleg` and `mideleg` can be specified;
     see `base.medeleg.delegatable_bits` and `base.mideleg.delegatable_bits`.
-  - Add the `extensions.F.fflags_dirty_policy` option to configure exactly
-    when mstatus[FS/SD] is set by floating point instructions.
+  - Finer-grained control on when `mstatus.FS` is dirtied by changes
+    to `fflags` is now possible; see `extensions.F.fflags_dirty_policy`.
+  - PMA regions now have two additional attributes to support the
+    Misaligned Atomicity Granule PMA: `misaligned_atomicity_granule_size_exp`
+    and `vector_misaligned_atomicity_granule_size_exp`, specifying the
+    MAG as a power of 2 for scalar and vector accesses respectively. A
+    value of `0` indicates an absence of the MAG PMA. The value is
+    restricted to a maximum of `12` (corresponding to a page size).
+  - The pre-address-translation `memory.misaligned.exceptions.amo`
+    configuration now allows misaligned AMOs to not raise an exception
+    (but see following sentence); in this case, the misalignment will
+    be checked by the MAG PMA for the access address. However,
+    exceptions are still raised for misaligned AMOs that straddle 4K
+    page boundaries when virtual memory is active, since the maximum
+    MAG is 2^12. The default has been changed to not raise exceptions;
+    this is not compatible with previous versions. To recover previous
+    behavior, specify `memory.misaligned.exceptions.amo` as
+    `{"Some": "AccessFault"}`.
+  - `memory.misaligned.allowed_within_exp` was renamed to
+    `memory.misaligned.default_allowed_within_exp` to indicate that
+    this parameter now specifies the default misaligned atomicity
+    granule that is used when no MAG PMA is specified for a memory
+    region.
+
+- The command line interface has been updated:
+  - A `--stop-at-pc` option terminates execution when the program counter
+    reaches the specified address.
+  - A `--dump-memory` option can be used to generate raw memory dump files
+    for each main memory region after execution ends.
 
 - Important issues addressed and bugs fixed:
+  - https://github.com/riscv/sail-riscv/issues/1807 : fix assertion on non-zero `mideleg` triggered by clearing `misa.S`
   - https://github.com/riscv/sail-riscv/issues/1794 : `vtype.vill` was not set when SEW was configured to exceed ELEN
+  - https://github.com/riscv/sail-riscv/issues/1782 : Invalid register group assertion for `vrgatherei16.vv`
   - https://github.com/riscv/sail-riscv/issues/1753 : Access to `xenvcfg` CSRs need to be gated by the specification version
   - https://github.com/riscv/sail-riscv/issues/1750 : Non-segmented indexed loads were trapping on legal overlaps
   - https://github.com/riscv/sail-riscv/issues/1748 : Segment loads/stores whose register numbers increment past v31 were not treated as reserved.
@@ -19,6 +76,8 @@
 
 - Other notes:
   - The model now requires the Sail 0.20.2 compiler version.
+  - The test suite has been updated to the latest release (2026-06-10)
+    from sail-riscv-tests. VLEN=64 is now tested in CI.
 
 # Release notes for version 0.12
 

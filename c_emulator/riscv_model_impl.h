@@ -47,6 +47,7 @@ public:
   void set_config_print_interrupt(bool on);
   void set_config_print_htif(bool on);
   void set_config_print_pma(bool on);
+  void set_config_print_pmp(bool on);
   void set_config_print_step(bool on);
 
   void set_config_rvfi(bool on);
@@ -78,18 +79,26 @@ public:
   std::string generate_dts();
   std::string generate_isa_string();
 
-  // access to model state
+  // read access to model state
 
   void tick_clock();
   bool try_step(int64_t step_no, bool exit_wait);
 
   int64_t xlen() const;
+  int64_t flen() const;
   int64_t physaddrbits_len() const;
   uint64_t mepc() const;
   uint64_t sepc() const;
   uint64_t htif_exit_code() const;
   bool htif_done() const;
   bool had_exception() const;
+  uint64_t pc() const;
+  uint64_t fcsr() const;
+
+  // These state accessors are not const due to the generated read
+  // accessors not being marked const in hart::Model.
+  uint64_t xreg(int64_t reg);
+  uint64_t freg(int64_t reg);
   // returns std::nullopt if the model has not thrown an exception.
   std::optional<std::string> string_of_current_exception();
 
@@ -106,6 +115,13 @@ public:
   // hand-rolled re-encoding.
   void pack_veda_capability_reg(int index, uint8_t out_bytes[16]);
   bool read_veda_capability_tag(int index);
+
+  // write access to model state
+
+  void set_xreg(int64_t reg, uint64_t val);
+  void set_freg(int64_t reg, uint64_t val);
+  void set_pc(uint64_t val);
+  void set_fcsr(uint64_t val);
 
   // RVFI support
 
@@ -169,6 +185,7 @@ private:
   bool get_config_print_interrupt(unit) override;
   bool get_config_print_htif(unit) override;
   bool get_config_print_pma(unit) override;
+  bool get_config_print_pmp(unit) override;
   bool get_config_rvfi(unit) override;
   bool get_config_use_abi_names(unit) override;
 
@@ -178,6 +195,7 @@ private:
   bool m_config_print_interrupt = false;
   bool m_config_print_htif = false;
   bool m_config_print_pma = false;
+  bool m_config_print_pmp = false;
   bool m_config_rvfi = false;
   bool m_config_use_abi_names = false;
 
