@@ -56,6 +56,7 @@ function check_CSR(csr : csreg, p : Privilege, access_type : CSRAccessType) -> b
   & check_CSR_access(csr, access_type)
   & is_CSR_accessible(csr, p, access_type)
   & stateen_allows_CSR_access(csr, p, access_type)
+  & veda_allows_CSR_access(csr, p, access_type)
 
 function check_CSR_result(csr : csreg, p : Privilege, access_type : CSRAccessType) -> CSRCheckResult = {
   if check_CSR(csr, p, access_type) then

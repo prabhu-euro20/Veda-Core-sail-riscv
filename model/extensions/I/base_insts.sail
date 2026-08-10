@@ -579,6 +579,9 @@ function clause execute MRET() = {
     if   hartSupports(Ext_Zicfilp)
     then zicfilp_restore_elp_on_xret(mRET, cur_privilege);
 
+    if   hartSupports(Ext_Veda)
+    then veda_pcc_restore_on_xret();
+
     long_csr_write_callback("mstatus", "mstatush", mstatus.bits);
 
     if   get_config_print_exception()
@@ -622,6 +625,9 @@ function clause execute SRET() = {
 
     if   hartSupports(Ext_Zicfilp)
     then zicfilp_restore_elp_on_xret(sRET, cur_privilege);
+
+    if   hartSupports(Ext_Veda)
+    then veda_pcc_restore_on_xret();
 
     long_csr_write_callback("mstatus", "mstatush", mstatus.bits);
 

@@ -25,6 +25,22 @@ function ext_fail_xret_priv () : unit -> unit = ()
 // forward `val` stays here.
 val handle_trap_extension : (Privilege, xlenbits, option(unit)) -> unit
 
+// Same real reason as handle_trap_extension immediately above: needs
+// veda_mepcc_base/_length, only visible once Veda_insts is required.
+// Called from extensions/I/base_insts.sail's execute MRET()/SRET(),
+// which (module I) does not itself require Veda -- only the forward
+// `val` lives here; the real body stays in extensions/Veda/veda_regs.sail
+// where it was written, resolved once the whole program links.
+val veda_pcc_restore_on_xret : unit -> unit
+
+// Same real reason again: needs veda_pcc_length, only visible once
+// Veda_insts is required. Called from sys/sys_control.sail's check_CSR
+// (the same real function that already calls stateen_allows_CSR_access
+// for the identical reason), which does not itself require Veda -- only
+// the forward `val` lives here; the real body is in
+// extensions/Veda/veda_regs.sail, right after veda_pcc_restore_on_xret.
+val veda_allows_CSR_access : (csreg, Privilege, CSRAccessType) -> bool
+
 // used for traps and ECALL
 function prepare_trap_vector(p : Privilege, cause : Mcause) -> xlenbits = {
   let tvec : Mtvec = match p {

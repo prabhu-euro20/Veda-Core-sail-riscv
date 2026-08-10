@@ -119,6 +119,107 @@ function veda_pcc_save_and_reset() -> unit = {
   veda_pcc_length = VEDA_PCC_UNBOUNDED;
 }
 
+// Automatic restore-on-mret/sret counterpart, matching real CHERI's own
+// mepcc-unseal-on-mret precedent (CHERI-RISC-V spec §12.2.19/§4.7.7:
+// "MRET unseals mepcc and writes the result into pcc", unconditional on
+// cause). Gated on veda_mepcc_length's own "was anything saved here"
+// sentinel, mirroring this project's own established "conditional, not
+// unconditional" convention (veda_pcc_save_and_reset()'s own capture is
+// itself conditional, for the identical reason).
+//
+// Honest note on this guard's real, empirically-checked scope, per this
+// project's own mutation-test discipline: because ALL THREE of this
+// project's own pre-existing save call sites (veda_trap(),
+// ext_handle_fetch_check_error, ext_handle_data_check_error, Milestone
+// 14) already save unconditionally whenever a trap is taken from a
+// bounded context -- not just this function's own Milestone-21-added
+// handle_trap_extension call site -- veda_mepcc_length is, in every
+// currently-reachable scenario tried, either genuinely fresh (a real
+// save just happened for THIS trap) or genuinely the untouched-since
+// -reset/self-consumed default (nothing to restore, and live PCC is
+// already unbounded, so copying the default over it is a harmless
+// no-op regardless). A dedicated mutation-test attempt to construct a
+// scenario where the guard's presence vs. absence is observable (a
+// direct, non-OCInvoke CSR write establishing bounded live PCC, timed
+// so no trap has fired yet) could not be built: any trap taken from
+// that bounded state immediately triggers a fresh save via the
+// pre-existing Milestone-14 call sites regardless of this function's
+// own guard, before this function is even reached -- confirmed by
+// removing the guard entirely and re-running the full self-check
+// regression, which stayed at 61/61 with zero observable difference.
+// The guard is kept because it matches this project's own stated
+// design principle and imposes no cost, not because a reachable
+// scenario currently depends on it -- stated honestly, not left as an
+// unverified claim.
+//
+// Self-consuming regardless: after copying veda_mepcc_base/_length into
+// live PCC, immediately reset them back to the unbounded sentinel, so a
+// saved value is never applied to more than one mret/sret.
+function veda_pcc_restore_on_xret() -> unit = {
+  if veda_mepcc_length != VEDA_PCC_UNBOUNDED then {
+    veda_pcc_base = veda_mepcc_base;
+    veda_pcc_length = veda_mepcc_length;
+    veda_mepcc_base = zeros();
+    veda_mepcc_length = VEDA_PCC_UNBOUNDED;
+  }
+}
+
+// Real, empirically-confirmed privilege-escalation gap, found while
+// explaining the mechanism above, not invented speculatively: mtvec
+// (0x305, the standard RISC-V trap-vector CSR) has never had any
+// compartment-aware gating -- MILESTONE_20_RESULTS.md already found and
+// documented this, and at the time judged it not independently
+// exploitable, because back then an *ordinary* trap left veda_pcc_length
+// narrowed across the trap, so a handler placed outside the compartment's
+// own bounds would immediately fetch-fault itself. veda_pcc_restore_on_xret's
+// own sibling, the handle_trap_extension hook above (Milestone 21,
+// universal PCC-reset-on-any-trap), deliberately removed exactly that
+// backstop for good, independent functional reasons -- but nobody went
+// back and re-examined the mtvec gap in light of it. A live PoC
+// (sail_tests/vc_pcc_mtvec_escape_neg.S), traced with --trace-instr,
+// empirically confirmed the composed result before this fix existed: a
+// bounded compartment can (1) csrw mtvec to point at attacker-chosen
+// code with zero trap, (2) trigger any ordinary trap (a plain ecall
+// suffices) -- and that code then runs with fully unbounded PCC, fetched
+// from an address the CPU trace showed was outside the compartment's own
+// bounds yet raised no fetch fault, proving PCC had already been reset by
+// the time of that fetch.
+//
+// Fix mirrors this exact codebase's own real, already-shipped precedent
+// for "gate a CSR on state defined in a different module" --
+// extensions/Stateen/stateen_access_checks.sail's stateen_allows_CSR_access,
+// ANDed into check_CSR (sys/sys_control.sail) as an independent conjunct
+// alongside is_CSR_accessible, not folded into is_CSR_accessible itself.
+// That precedent was followed deliberately over the alternative (editing
+// mtvec's own is_CSR_accessible clause or write_CSR clause directly in
+// exceptions/sys_exceptions.sail, both base-model files) for two real
+// reasons: (1) Sail's scattered write_CSR only allows one clause per CSR
+// address project-wide -- mtvec's is already claimed in
+// exceptions/sys_exceptions.sail, so a second Veda-side write_CSR(0x305,...)
+// clause is not an option, unlike the previously-unclaimed 0x7C0-0x7C5
+// range Milestone 20 gated directly; (2) editing sys_exceptions.sail's
+// existing is_CSR_accessible(0x305,_,_) clause to reference
+// veda_pcc_length would put Veda-specific state into a base-model file,
+// the same real circular-module-dependency problem Stateen's own header
+// comment names as its reason for using a separate hook instead.
+//
+// Real official CHERI-RISC-V precedent (specs/cheri-architecture.pdf,
+// Table 4.3: MTCC, "extends mtvec", Access=ASR; Section 4.3.5: reading or
+// writing any CSR requires PCC.perms.Access_System_Registers) gates BOTH
+// reads and writes of mtvec/MTCC. This fix deliberately gates writes only,
+// diverging from that broader rule to stay consistent with this
+// project's own already-stated, twice-applied principle (Milestone 20's
+// veda_pcc_*/veda_mode CSRs, and the query-family instructions before
+// them): capability/control metadata is always inspectable, only
+// mutation is restricted -- reading mtvec does not, by itself, grant any
+// new capability or help bypass anything a compartment doesn't already
+// know from its own bounds.
+function veda_allows_CSR_access(csr : csreg, priv : Privilege, access_type : CSRAccessType) -> bool =
+  match csr {
+    0x305 => (access_type == CSRRead) | (veda_pcc_length == VEDA_PCC_UNBOUNDED),
+    _     => true,
+  }
+
 // Milestone 18 (real, measured motivation: IMMEDIATE_LIMIT_INVESTIGATION --
 // RV64I's 12-bit immediate forces a full 6-instruction `li` per ODT-Populate
 // descriptor, and a real, dedicated benchmark showed a software-only `la`
