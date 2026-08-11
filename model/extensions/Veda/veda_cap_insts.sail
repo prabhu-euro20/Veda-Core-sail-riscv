@@ -491,18 +491,13 @@ function clause execute VEDA_OCINVOKE(rs2, rs1) = {
     // achieves, applied to the Base/Length subset this project's own
     // research found a real consumer for (PCC_COMPARTMENT_DESIGN.md §7:
     // Perms-on-PCC deliberately deferred, no real consumer exists yet).
-    // Phase 1 increment 2 scope note: the CAPABILITY widened, but the PCC
-    // compartment registers deliberately did NOT, so the bounds are
-    // narrowed back here. This is provably LOSSLESS in this increment --
-    // every capability's Base/Length originates from the ODT, whose own
-    // entry is still Base(32)/Length(16) -- so it reproduces the previous
-    // model's behaviour exactly, which is what keeps the verified test
-    // baseline meaningful rather than merely passing. PCC widens in the
-    // SAME increment that widens the ODT entry (that is when values wider
-    // than these can first exist); the VEDA_PCC_UNBOUNDED sentinel changes
-    // value at that point, which is why it is deliberately not done here.
-    veda_pcc_base = cs1.Base[31..0];
-    veda_pcc_length = cs1.Length[15..0];
+    // Increment 3: PCC is now as wide as the capability, so the
+    // compartment bounds are taken directly -- no truncation. This had
+    // to land in the SAME increment as the ODT widening: once an object
+    // can have a Base above 4 GiB, narrowing it into a 32-bit PCC would
+    // silently mis-bound the compartment, which is a real escape.
+    veda_pcc_base = cs1.Base;
+    veda_pcc_length = cs1.Length;
     // SSC (Stack-Spill Capability, see veda_types.sail's veda_scr enum):
     // clear (untag) on every successful invoke, unconditionally -- a
     // hardware guarantee, not a software discipline, the identical real
@@ -675,18 +670,13 @@ function clause execute VEDA_OCRETURN(rs1) = {
   else if cs1.otype != VEDA_OTYPE_SENTRY then veda_trap(rs1, VEDA_CAUSE_SEAL_VIOLATION)
   else if not(permBit(cs1.Perms, PERM_EXECUTE)) then veda_trap(rs1, VEDA_CAUSE_PERM_EXECUTE_VIOLATION)
   else {
-    // Phase 1 increment 2 scope note: the CAPABILITY widened, but the PCC
-    // compartment registers deliberately did NOT, so the bounds are
-    // narrowed back here. This is provably LOSSLESS in this increment --
-    // every capability's Base/Length originates from the ODT, whose own
-    // entry is still Base(32)/Length(16) -- so it reproduces the previous
-    // model's behaviour exactly, which is what keeps the verified test
-    // baseline meaningful rather than merely passing. PCC widens in the
-    // SAME increment that widens the ODT entry (that is when values wider
-    // than these can first exist); the VEDA_PCC_UNBOUNDED sentinel changes
-    // value at that point, which is why it is deliberately not done here.
-    veda_pcc_base = cs1.Base[31..0];
-    veda_pcc_length = cs1.Length[15..0];
+    // Increment 3: PCC is now as wide as the capability, so the
+    // compartment bounds are taken directly -- no truncation. This had
+    // to land in the SAME increment as the ODT widening: once an object
+    // can have a Base above 4 GiB, narrowing it into a 32-bit PCC would
+    // silently mis-bound the compartment, which is a real escape.
+    veda_pcc_base = cs1.Base;
+    veda_pcc_length = cs1.Length;
     // SSC: clear on every successful return too, the identical reason and
     // identical mechanism as VEDA_OCINVOKE above -- OCRETURN is a real,
     // general compartment-boundary crossing (not only used inside the

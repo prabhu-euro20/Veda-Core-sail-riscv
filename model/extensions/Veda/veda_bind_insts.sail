@@ -168,18 +168,15 @@ function clause execute VEDA_BINDINST(mode_bits, rs1, rd) = {
         RETIRE_SUCCESS
       } else if e.valid & owner_ok then {
         odt_write(object_id, claimed_entry);
-        // Narrow-ODT -> wide-capability bridge (DESIGN_01 decision 6): the
-        // capability format widened this increment but the ODT entry
-        // deliberately did not, so Base/Length/generation are zero-extended
-        // from the entry's still-narrow domains. Lossless in both
-        // directions -- a 32-bit Base IS a valid 56-bit Base -- and the
-        // ODT's own widths remain the real limit until the separate
-        // ODT-Populate operand redesign lands. flags is minted as zeros
-        // (opaque/reserved this increment).
+        // Increment 3: Base and Length now come straight across -- the ODT
+        // entry is as wide as the capability. Only `generation` is still
+        // bridged by a zero-extend, because the ODT's own generation stays
+        // 8 bits until its own increment. flags is minted as zeros
+        // (opaque/reserved).
         wC(rdno, struct {
           Object_ID  = object_id,
-          Base       = zero_extend(e.Base),
-          Length     = zero_extend(e.Length),
+          Base       = e.Base,
+          Length     = e.Length,
           Offset     = cur.Offset, // preserved across relocation, Section 4
           Perms      = e.Perms,
           otype      = UNSEALED_OTYPE,
@@ -203,12 +200,11 @@ function clause execute VEDA_BINDINST(mode_bits, rs1, rd) = {
     _ => {
       if e.valid & owner_ok then {
         odt_write(object_id, claimed_entry);
-        // Same narrow-ODT -> wide-capability bridge as the Rebind path
-        // above (DESIGN_01 decision 6); fresh Bind starts at Offset 0.
+        // Same as the Rebind path above; fresh Bind starts at Offset 0.
         wC(rdno, struct {
           Object_ID  = object_id,
-          Base       = zero_extend(e.Base),
-          Length     = zero_extend(e.Length),
+          Base       = e.Base,
+          Length     = e.Length,
           Offset     = zeros(),
           Perms      = e.Perms,
           otype      = UNSEALED_OTYPE,

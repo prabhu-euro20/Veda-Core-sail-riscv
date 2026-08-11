@@ -398,8 +398,17 @@ function clause execute VEDA_ODT_POPULATE(rs2, rs1, rd) = {
       let new_retired : bool = old_entry.valid & (old_entry.generation == 0xff);
       odt_write(object_id, struct {
         valid      = true,
-        Base       = descriptor[63..32],
-        Length     = descriptor[31..16],
+        // Increment 3: plain Populate keeps its packed single-GPR
+        // descriptor and is now explicitly the COMPACT form -- Base 32 /
+        // Length 16, zero-extended into the wide entry. 112 bits of
+        // Base(56)+Length(40)+Perms(16) simply cannot fit one GPR, so
+        // rather than inventing a multi-operand encoding here, the compact
+        // form is kept for the ordinary small-object case (and every
+        // existing program keeps working unchanged) while
+        // ODT-Populate-Fast below carries the full width. The limit is in
+        // the ENCODING, visibly, not a silent truncation of a wide value.
+        Base       = zero_extend(descriptor[63..32]),
+        Length     = zero_extend(descriptor[31..16]),
         Perms      = descriptor[15..0],
         generation = new_generation,
         // Milestone 12 (in progress): a (re)populated slot always resets
@@ -492,7 +501,12 @@ function clause execute VEDA_ODT_POPULATE_FAST(rs2, rs1, rd) = {
     // RV64-only, but that gate is invisible to the type checker here).
     let object_id_gpr64 : bits(64) = zero_extend(X(rs1));
     let object_id : bits(44) = object_id_gpr64[43..0];
-    let base : bits(32) = X(rs2)[31..0];
+    // Increment 3: Base is taken at its full 56-bit width from the GPR --
+    // this is the WIDE populate path. Sliced out of an explicit 64-bit
+    // widening for the usual reason (a direct xlenbits[55..0] is not
+    // provably in range when xlen might be 32).
+    let base_gpr64 : bits(64) = zero_extend(X(rs2));
+    let base : bits(56) = base_gpr64[55..0];
     let old_entry = odt_lookup(object_id);
     if old_entry.retired then Illegal_Instruction()
     else {
@@ -503,7 +517,14 @@ function clause execute VEDA_ODT_POPULATE_FAST(rs2, rs1, rd) = {
       odt_write(object_id, struct {
         valid      = true,
         Base       = base,
-        Length     = veda_attr[31..16],
+        // veda_attr widened to 64 bits with Length occupying [55..16] and
+        // Perms [15..0]. Keeping Length's LOW end at bit 16 and growing it
+        // upward makes this change backward compatible BY CONSTRUCTION: a
+        // program that wrote a 32-bit attr value still yields exactly the
+        // same Length and Perms, because the extra bits it never set read
+        // as zero. That is why no existing fast-populate program needed
+        // touching.
+        Length     = veda_attr[55..16],
         Perms      = veda_attr[15..0],
         generation = new_generation,
         owner_hart = VEDA_OWNER_UNOWNED,

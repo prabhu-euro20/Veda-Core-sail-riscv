@@ -246,9 +246,19 @@ let VEDA_OWNER_UNOWNED : bits(8) = 0xFF
 
 struct odt_entry = {
   valid      : bool,
-  Base       : bits(32),
-  Length     : bits(16),
+  // Phase 1 increment 3: Base 32 -> 56 and Length 16 -> 40, matching the
+  // capability format. THIS is where the 4 GiB and 64 KiB walls actually
+  // fall: until now the format could express a large object but the table
+  // could not supply one, so the limits were removed on paper only.
+  Base       : bits(56),
+  Length     : bits(40),
   Perms      : bits(16),
+  // generation stays 8 bits THIS increment, deliberately. It is genuinely
+  // independent of Base/Length (the capability's own 24-bit generation is
+  // fed by a lossless zero-extend), and widening it moves the retirement
+  // threshold from 256 to ~16.7M destroy/reuse cycles, which the existing
+  // saturation tests reach by looping. That needs its own increment and its
+  // own answer for how to test a threshold too large to loop to.
   generation : bits(8),
   owner_hart : bits(8),
   // Mirrors RTL Milestone 16 (rtl/MILESTONE_16_RESULTS.md,

@@ -86,9 +86,16 @@ register veda_ssc_tag : bool
 // §2.3.12/§11.1.2, read in full for PCC_COMPARTMENT_DESIGN.md). Reset
 // value is unbounded, so no code that never calls `OCInvoke` is ever
 // constrained by this feature at all.
-let VEDA_PCC_UNBOUNDED : bits(16) = 0xFFFF
-register veda_pcc_base : bits(32)
-register veda_pcc_length : bits(16)
+// Increment 3: the sentinel is all-ones in the WIDENED Length field, so
+// it stays semantically "maximum possible length = no compartment", the
+// same meaning it always had. Its numeric VALUE necessarily changes with
+// the width (0xFFFF -> 0xFFFFFFFFFF); keeping the old number would have
+// made a legitimate 65535-byte compartment read as unbounded, which is a
+// real hole, so the value change is deliberate and tests assert the new
+// one.
+let VEDA_PCC_UNBOUNDED : bits(40) = 0xFFFFFFFFFF
+register veda_pcc_base : bits(56)
+register veda_pcc_length : bits(40)
 // Milestone 14: the direct structural twin of `mepc`, but for the
 // compartment bounds instead of the plain PC -- real CHERI's own
 // "Exception Program Counter Capability" (CHERI ISA spec §3.4.7:
@@ -100,8 +107,8 @@ register veda_pcc_length : bits(16)
 // making this consistent with `mepc`'s own already-explicit
 // advance-before-`mret` convention (Milestone 9) rather than forcing an
 // automatic mechanism where none is cleanly available.
-register veda_mepcc_base : bits(32)
-register veda_mepcc_length : bits(16)
+register veda_mepcc_base : bits(56)
+register veda_mepcc_length : bits(40)
 
 // Milestone 14: shared by both real hard-trap paths that narrow PCC
 // away from a live compartment -- `veda_trap()` (every ordinary
@@ -232,7 +239,7 @@ function veda_allows_CSR_access(csr : csreg, priv : Privilege, access_type : CSR
 // Reset to zero (harmless: an all-zero Length/Perms just makes the first
 // fast-populated object real but permission-less until software actually
 // sets this CSR, not a crash/undefined-behavior risk).
-register veda_attr : bits(32)
+register veda_attr : bits(64)
 
 // Milestone 19 (Veda-Purecap Enforcement): next free slot in the same
 // real, RISC-V-spec-reserved M-mode custom range already used for
@@ -272,11 +279,11 @@ function clause is_CSR_accessible(0x7C3, _, _) = currentlyEnabled(Ext_Veda)
 function clause is_CSR_accessible(0x7C4, _, _) = currentlyEnabled(Ext_Veda)
 function clause is_CSR_accessible(0x7C5, _, _) = currentlyEnabled(Ext_Veda)
 
-function clause read_CSR(0x7C0) = zero_extend(veda_pcc_base)
-function clause read_CSR(0x7C1) = zero_extend(veda_pcc_length)
-function clause read_CSR(0x7C2) = zero_extend(veda_mepcc_base)
-function clause read_CSR(0x7C3) = zero_extend(veda_mepcc_length)
-function clause read_CSR(0x7C4) = zero_extend(veda_attr)
+function clause read_CSR(0x7C0) = veda_to_xlen(zero_extend(veda_pcc_base))
+function clause read_CSR(0x7C1) = veda_to_xlen(zero_extend(veda_pcc_length))
+function clause read_CSR(0x7C2) = veda_to_xlen(zero_extend(veda_mepcc_base))
+function clause read_CSR(0x7C3) = veda_to_xlen(zero_extend(veda_mepcc_length))
+function clause read_CSR(0x7C4) = veda_to_xlen(veda_attr)
 function clause read_CSR(0x7C5) = zero_extend(veda_mode)
 
 // Milestone 20 (real, empirically-confirmed vulnerability, not
@@ -320,21 +327,21 @@ function clause read_CSR(0x7C5) = zero_extend(veda_mode)
 // unrelated check -- considered and correctly excluded, not overlooked.
 function clause write_CSR(0x7C0, value) = {
   if veda_pcc_length != VEDA_PCC_UNBOUNDED then { veda_pcc_save_and_reset(); Err(()) }
-  else { veda_pcc_base = value[31..0]; Ok(zero_extend(veda_pcc_base)) }
+  else { let v64 : bits(64) = zero_extend(value); veda_pcc_base = v64[55..0]; Ok(veda_to_xlen(zero_extend(veda_pcc_base))) }
 }
 function clause write_CSR(0x7C1, value) = {
   if veda_pcc_length != VEDA_PCC_UNBOUNDED then { veda_pcc_save_and_reset(); Err(()) }
-  else { veda_pcc_length = value[15..0]; Ok(zero_extend(veda_pcc_length)) }
+  else { let v64 : bits(64) = zero_extend(value); veda_pcc_length = v64[39..0]; Ok(veda_to_xlen(zero_extend(veda_pcc_length))) }
 }
 function clause write_CSR(0x7C2, value) = {
   if veda_pcc_length != VEDA_PCC_UNBOUNDED then { veda_pcc_save_and_reset(); Err(()) }
-  else { veda_mepcc_base = value[31..0]; Ok(zero_extend(veda_mepcc_base)) }
+  else { let v64 : bits(64) = zero_extend(value); veda_mepcc_base = v64[55..0]; Ok(veda_to_xlen(zero_extend(veda_mepcc_base))) }
 }
 function clause write_CSR(0x7C3, value) = {
   if veda_pcc_length != VEDA_PCC_UNBOUNDED then { veda_pcc_save_and_reset(); Err(()) }
-  else { veda_mepcc_length = value[15..0]; Ok(zero_extend(veda_mepcc_length)) }
+  else { let v64 : bits(64) = zero_extend(value); veda_mepcc_length = v64[39..0]; Ok(veda_to_xlen(zero_extend(veda_mepcc_length))) }
 }
-function clause write_CSR(0x7C4, value) = { veda_attr = value[31..0]; Ok(zero_extend(veda_attr)) }
+function clause write_CSR(0x7C4, value) = { veda_attr = zero_extend(value); Ok(veda_to_xlen(veda_attr)) }
 // Milestone 19: M-mode-write-gated, explicitly, inside this clause --
 // matching VEDA_OSPECIALRW's own established precedent
 // (veda_cap_insts.sail) for "privileged Veda operations check
@@ -478,8 +485,8 @@ function veda_test_seed_odt() -> unit = {
   // already used in this codebase (veda_types.sail's vcapno_to_vcapidx).
   odt_write(to_bits(44, 1), struct {
     valid      = true,
-    Base       = 0x80010000,
-    Length     = 0x0040,
+    Base       = 0x00000080010000,
+    Length     = 0x0000000040,
     Perms      = 0x100C,
     generation = zeros(),
     owner_hart = VEDA_OWNER_UNOWNED,
@@ -491,8 +498,8 @@ function veda_test_seed_odt() -> unit = {
   // actually fires rather than assuming it does from the code alone.
   odt_write(to_bits(44, 2), struct {
     valid      = true,
-    Base       = 0x80010100,
-    Length     = 0x0040,
+    Base       = 0x00000080010100,
+    Length     = 0x0000000040,
     Perms      = 0x000C,
     generation = zeros(),
     owner_hart = VEDA_OWNER_UNOWNED,
@@ -505,8 +512,8 @@ function veda_test_seed_odt() -> unit = {
   // easy to construct by hand in a test program via OCA.
   odt_write(to_bits(44, 3), struct {
     valid      = true,
-    Base       = 0x80010200,
-    Length     = 0x0010,
+    Base       = 0x00000080010200,
+    Length     = 0x0000000010,
     Perms      = 0x0300,
     generation = zeros(),
     owner_hart = VEDA_OWNER_UNOWNED,
@@ -517,8 +524,8 @@ function veda_test_seed_odt() -> unit = {
   // can confirm CSeal/CUnseal's own authorization check actually fires.
   odt_write(to_bits(44, 4), struct {
     valid      = true,
-    Base       = 0x80010300,
-    Length     = 0x0010,
+    Base       = 0x00000080010300,
+    Length     = 0x0000000010,
     Perms      = 0x0000,
     generation = zeros(),
     owner_hart = VEDA_OWNER_UNOWNED,
@@ -537,8 +544,8 @@ function veda_test_seed_odt() -> unit = {
   // ODT-Populate instruction either).
   odt_write(to_bits(44, 5), struct {
     valid      = true,
-    Base       = 0x80010400,
-    Length     = 0x0010,
+    Base       = 0x00000080010400,
+    Length     = 0x0000000010,
     Perms      = 0x000C,
     generation = zeros(),
     owner_hart = 0x63, // 99 decimal -- a real, distinct, non-zero "other hart"
