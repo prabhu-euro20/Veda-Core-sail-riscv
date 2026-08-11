@@ -43,27 +43,46 @@ mapping vcap_name : bits(4) <-> string = {
   0xc <-> "c12", 0xd <-> "c13", 0xe <-> "c14", 0xf <-> "c15",
 }
 
-// The capability register's field layout, VEDA_CORE_SPEC.md Section 2:
-//   Tag(1, out-of-band) + Object_ID(23) + Base(32) + Length(16) + Offset(16)
-//   + Perms(16) + otype(16) + Reserved(8) = 127, +1 padding = 128 bits.
-// Object_ID widened from 16 to 23 bits, and Reserved narrowed from 15 to 8
-// (now fully consumed by the generation counter, no spare bits), in the
-// post-Milestone-V-A scaling-barrier research pass -- see
-// veda-core/SCALING_BARRIERS_RESEARCH.md Section 3 for the bit-budget
-// arithmetic and veda-core/VEDA_CORE_SPEC.md Section 2 for the spec change
-// this mirrors exactly.
+// The capability register's field layout -- Phase 1 increment 2, the
+// 256-bit respec (veda-core-linux design/DESIGN_01_CAPABILITY_FORMAT_RESPEC.md,
+// "Resolved implementation decisions"):
+//   Tag(1, out-of-band) + Object_ID(44) + Base(56) + Length(40) + Offset(40)
+//   + Perms(16) + otype(16) + generation(24) + flags(20) = 256 exactly.
+// There is NO padding bit any more: the old 128-bit layout was 127 data bits
+// + 1 pad; 256 is exact, so the pad (and the unpack's bit-0 skip) is gone.
+//
+// Why each width (DESIGN_01 "Problem: four spec-level walls"): the previous
+// format could not *express* Linux-scale objects at all -- Length(16) capped
+// an object at 64 KiB, Base(32) capped physical memory at 4 GiB,
+// Object_ID(23) capped live objects at 8.4M, and the generation counter
+// (carried in the old `Reserved`) retired a slot after 255 destroy/reuse
+// cycles. Widening the SEPARATE CRF is what makes this cheap: the 64-bit GPR
+// datapath is untouched (CRF_ARCHITECTURE_ALIGNMENT_VERDICT's own
+// keep-it-separate verdict is the enabler, not an obstacle).
+//
+// `Reserved` is renamed to `generation` because that is what it always
+// literally was (see the old comment: "now fully consumed by the generation
+// counter"). Sail's type checker turns every stale `.Reserved` into a compile
+// error rather than a silent bug, which is exactly why the rename is safe.
+// `flags` is new and deliberately OPAQUE: 20 reserved bits, minted as zeros
+// by Bind, no instruction reads or writes individual bits yet. DESIGN_01
+// names COW-hint/residency-mirror/CID as eventual tenants, but assigning
+// positions (especially a CID width) before the DESIGN_00 namespace work
+// would be an under-sourced guess.
+//
 // Tag is modeled separately (crTags, veda_regs.sail) since it is
-// out-of-band and not part of the 128-bit value, matching how mem_meta
+// out-of-band and not part of the 256-bit value, matching how mem_meta
 // (core/mem_metadata.sail) keeps the memory-resident tag out-of-band from
 // data too.
 struct capability = {
-  Object_ID : bits(23),
-  Base      : bits(32),
-  Length    : bits(16),
-  Offset    : bits(16),
-  Perms     : bits(16),
-  otype     : bits(16),
-  Reserved  : bits(8),
+  Object_ID  : bits(44),
+  Base       : bits(56),
+  Length     : bits(40),
+  Offset     : bits(40),
+  Perms      : bits(16),
+  otype      : bits(16),
+  generation : bits(24),
+  flags      : bits(20),
 }
 
 // otype sentinel, VEDA_CORE_SPEC.md Section 2: all-ones = UNSEALED.
@@ -83,40 +102,73 @@ let UNSEALED_OTYPE : bits(16) = 0xFFFF
 let VEDA_OTYPE_SENTRY : bits(16) = 0xFFFE
 
 let zero_capability : capability = struct {
-  Object_ID = zeros(),
-  Base      = zeros(),
-  Length    = zeros(),
-  Offset    = zeros(),
-  Perms     = zeros(),
-  otype     = UNSEALED_OTYPE,
-  Reserved  = zeros(),
+  Object_ID  = zeros(),
+  Base       = zeros(),
+  Length     = zeros(),
+  Offset     = zeros(),
+  Perms      = zeros(),
+  otype      = UNSEALED_OTYPE,
+  generation = zeros(),
+  flags      = zeros(),
 }
 
 function isSealedCap(c : capability) -> bool = c.otype != UNSEALED_OTYPE
 
-// Pack/unpack a capability to/from its real 128-bit memory representation
-// -- Milestone 7 (OCL.C/OCS.C, VEDA_CORE_SPEC.md's own field order and bit
-// budget, Section 2: "Object_ID(23)+Base(32)+Length(16)+Offset(16)+
-// Perms(16)+otype(16)+Reserved(8) = 127, +1 padding bit = 128"). Packed
-// MSB-to-LSB in the same order the spec's own field table lists them, with
-// the single pad bit as the true LSB (bit 0) -- an arbitrary but fixed,
-// self-consistent choice, since the spec names a padding bit but never
-// assigns it a position. Tag is deliberately NOT part of this 128-bit
-// value (Section 2: "out-of-band... not counted in the 128") -- it is
-// packed/unpacked separately, via mem_meta (core/mem_metadata.sail),
-// exactly mirroring how it is already kept separate from the capability
-// register's own 128 data bits (crTags, veda_regs.sail).
-function veda_cap_pack(c : capability) -> bits(128) =
-  c.Object_ID @ c.Base @ c.Length @ c.Offset @ c.Perms @ c.otype @ c.Reserved @ 0b0
+// Phase 1 increment 2 (DESIGN_01 decision 7): Ext_Veda is now an RV64-only
+// extension. Base(56), Object_ID(44), Length(40) and Offset(40) all exceed
+// 32 bits, so `zero_extend(field) : xlenbits` is ill-typed whenever xlen
+// could be 32 -- and this codebase already learned, the hard way, that an
+// encdec `when ... & xlen == 64` guard is NOT visible to the type checker
+// inside an execute body (see the recorded lesson at VEDA_NMC_ADD_D).
+//
+// So capability address arithmetic is done in an explicit 64-bit domain and
+// narrowed once, here, at the boundary. `truncate` is well-typed for both
+// xlen values because core/xlen.sail constrains xlen to {32, 64}, hence
+// xlen <= 64. On RV64 this is an exact identity; on RV32 every Veda
+// instruction fails to decode at all, so the narrowing is unreachable --
+// the extension is gated off, not silently truncating real values.
+function veda_to_xlen(v : bits(64)) -> xlenbits = truncate(v, xlen)
 
-function veda_cap_unpack(v : bits(128)) -> capability = struct {
-  Object_ID = v[127..105],
-  Base      = v[104..73],
-  Length    = v[72..57],
-  Offset    = v[56..41],
-  Perms     = v[40..25],
-  otype     = v[24..9],
-  Reserved  = v[8..1],
+// Pack/unpack a capability to/from its real 256-bit memory representation
+// (OCL.C/OCS.C). Packed MSB-to-LSB in the same order the field table lists
+// them. Unlike the old 128-bit layout there is NO pad bit: the eight fields
+// sum to exactly 256 (44+56+40+40+16+16+24+20), so pack/unpack were
+// re-derived field-by-field rather than width-patched -- the old
+// "@ 0b0" pad term and the unpack's bit-0 skip are gone.
+//
+// Bit ranges, stated explicitly because a silent off-by-one here would be a
+// capability-corruption bug the type checker cannot catch (every slice is
+// well-typed, only the *boundaries* carry meaning):
+//   Object_ID  [255..212]  44
+//   Base       [211..156]  56
+//   Length     [155..116]  40
+//   Offset     [115..76]   40
+//   Perms      [75..60]    16
+//   otype      [59..44]    16
+//   generation [43..20]    24
+//   flags      [19..0]     20
+//
+// Tag is deliberately NOT part of this 256-bit value -- it is carried
+// out-of-band via mem_meta (core/mem_metadata.sail), exactly mirroring how
+// it is already kept separate from the capability register's own data bits
+// (crTags, veda_regs.sail). NOTE (DESIGN_01 decision 1): because a
+// capability is now 32 bytes, the memory tag granule widens to 32 bytes so
+// one capability still occupies exactly ONE granule. Keeping a 16-byte
+// granule would let a plain store rewrite bytes 16..31 -- which hold Perms,
+// otype and generation -- while the start granule's tag survived, i.e. a
+// direct permission/generation forgery primitive.
+function veda_cap_pack(c : capability) -> bits(256) =
+  c.Object_ID @ c.Base @ c.Length @ c.Offset @ c.Perms @ c.otype @ c.generation @ c.flags
+
+function veda_cap_unpack(v : bits(256)) -> capability = struct {
+  Object_ID  = v[255..212],
+  Base       = v[211..156],
+  Length     = v[155..116],
+  Offset     = v[115..76],
+  Perms      = v[75..60],
+  otype      = v[59..44],
+  generation = v[43..20],
+  flags      = v[19..0],
 }
 
 // Perms bit-position assignment -- a genuinely new decision made while
@@ -151,9 +203,30 @@ let PERM_NMC_COMPUTE                   : range(0,15) = 12
 function permBit(perms : bits(16), b : range(0,15)) -> bool = perms[b] == 0b1
 
 // The Object Descriptor Table entry, VEDA_CORE_SPEC.md Section 5.1: flat,
-// single-level, system-wide, indexed directly by the 23-bit Object_ID
-// (widened from 16 bits this pass, see the `capability` struct comment
-// above). Generation narrowed from 15 to 8 bits this same pass -- no
+// single-level, system-wide.
+//
+// PHASE 1 INCREMENT 2 SCOPE NOTE (DESIGN_01 decision 6, stated so the
+// asymmetry is not mistaken for an oversight): the CAPABILITY widened to
+// Object_ID(44)/Base(56)/Length(40)/generation(24), but this ODT ENTRY
+// deliberately did NOT. Bind zero-extends the still-narrow entry fields into
+// the wide capability, which is a lossless bridge (a 32-bit Base is a valid
+// 56-bit Base). Keeping the entry narrow here keeps the atomic struct change
+// smaller and defers the genuinely separate ODT-Populate operand redesign --
+// Base56+Length40+Perms16 = 112 bits no longer fits the single-GPR packed
+// descriptor, and veda_attr (bits(32)) cannot hold Length40+Perms16 -- to its
+// own tested increment. Until then the ODT's own domains (Base 32-bit,
+// Length 16-bit, generation 8-bit) remain the real, honest limit on what an
+// object can be, regardless of what the capability format can express.
+//
+// The table is indexed by the low bits of the Object_ID with an explicit
+// out-of-range guard (veda_regs.sail): the capability legitimately carries a
+// full 44-bit Object_ID, but a flat vector(2^44) is ~300 TiB and will not
+// build, so ids at or above the modeled table size read as OBJECT_NOT_FOUND.
+// That bound is the honest interim until the segmented-Object_ID trilemma
+// (DESIGN_06) is designed -- the same "real, bounded, honestly-scoped"
+// discipline as the RTL's own 256-entry ODT.
+//
+// Generation narrowed from 15 to 8 bits in an earlier pass -- no
 // longer "the simplest choice," now a deliberate match to CHERI-D's real,
 // empirically-derived per-allocation generation-counter width (arXiv
 // 2606.19055; veda-core/SCALING_BARRIERS_RESEARCH.md Section 3/6). No

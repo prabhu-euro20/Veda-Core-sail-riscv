@@ -431,10 +431,30 @@ overload CTag = {rCTag_bits, wCTag_bits, rCTag, wCTag}
 // note on why the flat design still holds at this width.
 register veda_odt : vector(8388608, odt_entry) = vector_init(empty_odt_entry)
 
-function odt_lookup(object_id : bits(23)) -> odt_entry = veda_odt[unsigned(object_id)]
+// Phase 1 increment 2 (DESIGN_01 decision 3): the capability now carries a
+// full 44-bit Object_ID, but the modeled table stays a flat, BOUNDED window
+// -- a vector(2^44) would be roughly 300 TiB and simply will not build. Ids
+// at or above the modeled size read as "not found" (an empty entry, valid =
+// false), which flows into the existing OBJECT_NOT_FOUND trap path with no
+// new mechanism; writes to out-of-range ids are dropped for the same reason.
+//
+// This is an honest interim bound, not a claim that the namespace is small:
+// the same "real, bounded, honestly-scoped" discipline the RTL already
+// applies to its own 256-entry ODT, holding until the segmented-Object_ID
+// trilemma (DESIGN_06) is designed. The explicit comparison before indexing
+// is also what discharges Sail's own in-bounds proof obligation -- the index
+// domain (2^44) and the array size (2^23) are now decoupled, so they must be
+// reconciled by a real check rather than by assumption.
+let VEDA_ODT_MODELED_ENTRIES = 8388608
 
-function odt_write(object_id : bits(23), e : odt_entry) -> unit = {
-  veda_odt[unsigned(object_id)] = e
+function odt_lookup(object_id : bits(44)) -> odt_entry = {
+  let idx = unsigned(object_id);
+  if idx < VEDA_ODT_MODELED_ENTRIES then veda_odt[idx] else empty_odt_entry
+}
+
+function odt_write(object_id : bits(44), e : odt_entry) -> unit = {
+  let idx = unsigned(object_id);
+  if idx < VEDA_ODT_MODELED_ENTRIES then veda_odt[idx] = e
 }
 
 // Milestone V-A test scaffold, explicitly temporary (see
@@ -456,7 +476,7 @@ function veda_test_seed_odt() -> unit = {
   // (a bare hex literal is sized by its digit count, 4 hex digits = 16
   // bits, which no longer matches) -- same to_bits(width, value) pattern
   // already used in this codebase (veda_types.sail's vcapno_to_vcapidx).
-  odt_write(to_bits(23, 1), struct {
+  odt_write(to_bits(44, 1), struct {
     valid      = true,
     Base       = 0x80010000,
     Length     = 0x0040,
@@ -469,7 +489,7 @@ function veda_test_seed_odt() -> unit = {
   // Permit_NMC_Compute (Perms = 0x000C, Load+Store only), so a real
   // negative-control test can confirm NMC_ADD's own new permission gate
   // actually fires rather than assuming it does from the code alone.
-  odt_write(to_bits(23, 2), struct {
+  odt_write(to_bits(44, 2), struct {
     valid      = true,
     Base       = 0x80010100,
     Length     = 0x0040,
@@ -483,7 +503,7 @@ function veda_test_seed_odt() -> unit = {
   // 8, + Permit_Unseal, bit 9, veda_types.sail's bit assignment), Length
   // = 0x10 so small in-range Offset values (used directly as otype) are
   // easy to construct by hand in a test program via OCA.
-  odt_write(to_bits(23, 3), struct {
+  odt_write(to_bits(44, 3), struct {
     valid      = true,
     Base       = 0x80010200,
     Length     = 0x0010,
@@ -495,7 +515,7 @@ function veda_test_seed_odt() -> unit = {
   // Milestone V-B addition: a fourth seeded object identical to Object_ID
   // 3 except *without* Permit_Seal/Permit_Unseal, so a real negative test
   // can confirm CSeal/CUnseal's own authorization check actually fires.
-  odt_write(to_bits(23, 4), struct {
+  odt_write(to_bits(44, 4), struct {
     valid      = true,
     Base       = 0x80010300,
     Length     = 0x0010,
@@ -515,7 +535,7 @@ function veda_test_seed_odt() -> unit = {
   // without that (the identical real technique already used for every
   // other seeded object above, none of which are populated via a real
   // ODT-Populate instruction either).
-  odt_write(to_bits(23, 5), struct {
+  odt_write(to_bits(44, 5), struct {
     valid      = true,
     Base       = 0x80010400,
     Length     = 0x0010,

@@ -56,18 +56,21 @@ function clause execute VEDA_OCA(rs2, rs1, rd) = {
   // `xlenbits`, not hardcoded `bits(64)` -- OCA has no `xlen == 64` gate
   // (unlike OCL.D/OCS.D/NMC_ADD.D), so a real type error ("Failed to
   // prove constraint: xlen == 64") confirmed the width must stay generic.
-  let offset_ext : xlenbits = zero_extend(cap.Offset);
-  let sum : xlenbits = offset_ext + delta;
+  // Offset is 40 bits now, so this must widen through the explicit
+  // 64-bit domain (Ext_Veda is RV64-only, DESIGN_01 decision 7).
+  let offset_ext : bits(64) = zero_extend(cap.Offset);
+  let sum : bits(64) = offset_ext + zero_extend(delta);
   let sum_signed : int = signed(sum);
   let out_of_range : bool = sum_signed < 0 | sum_signed >= unsigned(cap.Length);
   let new_cap : capability = struct {
     Object_ID = cap.Object_ID,
     Base      = cap.Base,
     Length    = cap.Length,
-    Offset    = sum[15..0],
+    Offset    = sum[39..0],
     Perms     = cap.Perms,
     otype     = cap.otype,
-    Reserved  = cap.Reserved,
+    generation = cap.generation,
+    flags      = cap.flags,
   };
   let rdno = vcapidx_to_vcapno(rd);
   wC(rdno, new_cap);
@@ -119,13 +122,13 @@ function clause execute VEDA_CAPQUERY(q, rs1, rd) = {
   // Offset alone, CGetLen = Length -- the three-way split Section 1/2's
   // field-fix text already established, not a new decision here.
   let result : xlenbits = match q {
-    VEDA_CGETBASE   => zero_extend(cap.Base),
-    VEDA_CGETLEN    => zero_extend(cap.Length),
+    VEDA_CGETBASE   => veda_to_xlen(zero_extend(cap.Base)),
+    VEDA_CGETLEN    => veda_to_xlen(zero_extend(cap.Length)),
     VEDA_CGETPERM   => zero_extend(cap.Perms),
     VEDA_CGETTAG    => zero_extend(bool_bit(CTag(capidx))),
     VEDA_CGETTYPE   => zero_extend(cap.otype),
-    VEDA_CGETADDR   => zero_extend(cap.Base) + zero_extend(cap.Offset),
-    VEDA_CGETOFFSET => zero_extend(cap.Offset),
+    VEDA_CGETADDR   => veda_to_xlen(zero_extend(cap.Base) + zero_extend(cap.Offset)),
+    VEDA_CGETOFFSET => veda_to_xlen(zero_extend(cap.Offset)),
   };
   X(rd) = result;
   RETIRE_SUCCESS
@@ -184,7 +187,10 @@ mapping clause encdec = VEDA_CSETBOUNDSEXACT(rs2, rs1, rd)
 function veda_setbounds(rs2 : regidx, rs1 : vcapidx, rd : vcapidx) -> unit = {
   let capidx = vcapidx_to_vcapno(rs1);
   let cap = C(capidx);
-  let new_length : xlenbits = X(rs2);
+  // Length is 40 bits now, so the requested value is taken through the
+  // explicit 64-bit domain before slicing (a direct xlenbits[39..0] is
+  // not provably in range when xlen might be 32).
+  let new_length : bits(64) = zero_extend(X(rs2));
   // "exceed cs1's own current window": the narrowed window (starting at
   // the current position, cs1.Offset) must not extend past cs1's own
   // Length -- monotonic narrowing, never widening, the same principle
@@ -195,11 +201,12 @@ function veda_setbounds(rs2 : regidx, rs1 : vcapidx, rd : vcapidx) -> unit = {
   let new_cap : capability = struct {
     Object_ID = cap.Object_ID,
     Base      = cap.Base + zero_extend(cap.Offset),
-    Length    = new_length[15..0],
+    Length    = new_length[39..0],
     Offset    = zeros(),
     Perms     = cap.Perms,
     otype     = cap.otype,
-    Reserved  = cap.Reserved,
+    generation = cap.generation,
+    flags      = cap.flags,
   };
   let rdno = vcapidx_to_vcapno(rd);
   wC(rdno, new_cap);
@@ -269,11 +276,21 @@ function clause execute VEDA_CSEAL(rs2, rs1, rd) = {
   // indistinguishable from a genuine VEDA_CSEALENTRY-minted sentry to
   // every downstream consumer (VEDA_OCRETURN), defeating the mechanism
   // entirely.
+  // Phase 1 increment 2: Offset widened to 40 bits while otype stayed 16,
+  // so the requested otype no longer type-matches. A naive [15..0]
+  // truncation here would REINTRODUCE sentinel forgery -- Offset 0x1FFFF
+  // would alias UNSEALED_OTYPE (0xFFFF) and 0x1FFFE would forge
+  // VEDA_OTYPE_SENTRY (0xFFFE), i.e. exactly the sentry-forgery hole the
+  // Minimal-OS-kernel Milestone B closed. So an explicit REPRESENTABILITY
+  // guard comes first (real CHERI's own `cursor <= cap_max_otype` bound),
+  // and only a representable Offset is narrowed into an otype.
+  let otype_req : bits(16) = cs2.Offset[15..0];
   let authorized : bool =
     CTag(cs2idx) & not(isSealedCap(cs2)) & permBit(cs2.Perms, PERM_SEAL)
     & (unsigned(cs2.Offset) < unsigned(cs2.Length))
-    & (cs2.Offset != UNSEALED_OTYPE)
-    & (cs2.Offset != VEDA_OTYPE_SENTRY);
+    & (unsigned(cs2.Offset) <= 65535)  // 0xFFFF as an int: `unsigned` yields int, and a 0xFFFF literal is bits(16)
+    & (otype_req != UNSEALED_OTYPE)
+    & (otype_req != VEDA_OTYPE_SENTRY);
   // An already-untagged or already-sealed cs1 can't be (re-)sealed --
   // "if cs1 was already sealed" from the spec text, plus the same
   // untagged-source-can't-produce-a-valid-result reasoning already
@@ -285,8 +302,9 @@ function clause execute VEDA_CSEAL(rs2, rs1, rd) = {
     Length    = cs1.Length,
     Offset    = cs1.Offset,
     Perms     = cs1.Perms,
-    otype     = cs2.Offset,
-    Reserved  = cs1.Reserved,
+    otype     = otype_req,
+    generation = cs1.generation,
+    flags      = cs1.flags,
   };
   let rdno = vcapidx_to_vcapno(rd);
   wC(rdno, new_cap);
@@ -305,7 +323,7 @@ function clause execute VEDA_CUNSEAL(rs2, rs1, rd) = {
   // *this specific* sealed type), within cs2's own bounds.
   let authorized : bool =
     CTag(cs2idx) & not(isSealedCap(cs2)) & permBit(cs2.Perms, PERM_UNSEAL)
-    & isSealedCap(cs1) & (cs2.Offset == cs1.otype)
+    & isSealedCap(cs1) & (cs2.Offset == zero_extend(cs1.otype))
     & (unsigned(cs2.Offset) < unsigned(cs2.Length));
   let ok : bool = authorized & CTag(cs1idx);
   let new_cap : capability = struct {
@@ -315,7 +333,8 @@ function clause execute VEDA_CUNSEAL(rs2, rs1, rd) = {
     Offset    = cs1.Offset,
     Perms     = cs1.Perms,
     otype     = UNSEALED_OTYPE,
-    Reserved  = cs1.Reserved,
+    generation = cs1.generation,
+    flags      = cs1.flags,
   };
   let rdno = vcapidx_to_vcapno(rd);
   wC(rdno, new_cap);
@@ -369,7 +388,8 @@ function clause execute VEDA_CSEALENTRY(rs1, rd) = {
     Offset    = cs1.Offset,
     Perms     = cs1.Perms,
     otype     = VEDA_OTYPE_SENTRY,
-    Reserved  = cs1.Reserved,
+    generation = cs1.generation,
+    flags      = cs1.flags,
   };
   let rdno = vcapidx_to_vcapno(rd);
   wC(rdno, new_cap);
@@ -461,7 +481,8 @@ function clause execute VEDA_OCINVOKE(rs2, rs1) = {
       Offset    = cs2.Offset,
       Perms     = cs2.Perms,
       otype     = UNSEALED_OTYPE,
-      Reserved  = cs2.Reserved,
+      generation = cs2.generation,
+      flags      = cs2.flags,
     };
     wC(VEDA_IDC_INDEX, unsealed_cs2);
     wCTag(VEDA_IDC_INDEX, true);
@@ -470,8 +491,18 @@ function clause execute VEDA_OCINVOKE(rs2, rs1) = {
     // achieves, applied to the Base/Length subset this project's own
     // research found a real consumer for (PCC_COMPARTMENT_DESIGN.md §7:
     // Perms-on-PCC deliberately deferred, no real consumer exists yet).
-    veda_pcc_base = cs1.Base;
-    veda_pcc_length = cs1.Length;
+    // Phase 1 increment 2 scope note: the CAPABILITY widened, but the PCC
+    // compartment registers deliberately did NOT, so the bounds are
+    // narrowed back here. This is provably LOSSLESS in this increment --
+    // every capability's Base/Length originates from the ODT, whose own
+    // entry is still Base(32)/Length(16) -- so it reproduces the previous
+    // model's behaviour exactly, which is what keeps the verified test
+    // baseline meaningful rather than merely passing. PCC widens in the
+    // SAME increment that widens the ODT entry (that is when values wider
+    // than these can first exist); the VEDA_PCC_UNBOUNDED sentinel changes
+    // value at that point, which is why it is deliberately not done here.
+    veda_pcc_base = cs1.Base[31..0];
+    veda_pcc_length = cs1.Length[15..0];
     // SSC (Stack-Spill Capability, see veda_types.sail's veda_scr enum):
     // clear (untag) on every successful invoke, unconditionally -- a
     // hardware guarantee, not a software discipline, the identical real
@@ -494,7 +525,7 @@ function clause execute VEDA_OCINVOKE(rs2, rs1) = {
     // below (return is a real compartment-boundary crossing too; the
     // same leak class applies in that direction as well).
     veda_ssc_tag = false;
-    let target : xlenbits = zero_extend(cs1.Base) + zero_extend(cs1.Offset);
+    let target : xlenbits = veda_to_xlen(zero_extend(cs1.Base) + zero_extend(cs1.Offset));
     jump_to([target with 0 = bitzero])
   }
 }
@@ -568,10 +599,10 @@ function clause execute VEDA_OCJALR(rs2, rs1) = {
   else if not(isSealedCap(cs1)) then veda_trap(rs1, VEDA_CAUSE_SEAL_VIOLATION)
   else if isSealedCap(cs2) then veda_trap(rs2, VEDA_CAUSE_SEAL_VIOLATION)
   else if not(permBit(cs2.Perms, PERM_UNSEAL)) then veda_trap(rs2, VEDA_CAUSE_SEAL_VIOLATION)
-  else if cs2.Offset != cs1.otype then veda_trap(rs1, VEDA_CAUSE_TYPE_VIOLATION)
+  else if cs2.Offset != zero_extend(cs1.otype) then veda_trap(rs1, VEDA_CAUSE_TYPE_VIOLATION)
   else if not(permBit(cs1.Perms, PERM_EXECUTE)) then veda_trap(rs1, VEDA_CAUSE_PERM_EXECUTE_VIOLATION)
   else {
-    let target : xlenbits = zero_extend(cs1.Base) + zero_extend(cs1.Offset);
+    let target : xlenbits = veda_to_xlen(zero_extend(cs1.Base) + zero_extend(cs1.Offset));
     jump_to([target with 0 = bitzero])
   }
 }
@@ -644,15 +675,25 @@ function clause execute VEDA_OCRETURN(rs1) = {
   else if cs1.otype != VEDA_OTYPE_SENTRY then veda_trap(rs1, VEDA_CAUSE_SEAL_VIOLATION)
   else if not(permBit(cs1.Perms, PERM_EXECUTE)) then veda_trap(rs1, VEDA_CAUSE_PERM_EXECUTE_VIOLATION)
   else {
-    veda_pcc_base = cs1.Base;
-    veda_pcc_length = cs1.Length;
+    // Phase 1 increment 2 scope note: the CAPABILITY widened, but the PCC
+    // compartment registers deliberately did NOT, so the bounds are
+    // narrowed back here. This is provably LOSSLESS in this increment --
+    // every capability's Base/Length originates from the ODT, whose own
+    // entry is still Base(32)/Length(16) -- so it reproduces the previous
+    // model's behaviour exactly, which is what keeps the verified test
+    // baseline meaningful rather than merely passing. PCC widens in the
+    // SAME increment that widens the ODT entry (that is when values wider
+    // than these can first exist); the VEDA_PCC_UNBOUNDED sentinel changes
+    // value at that point, which is why it is deliberately not done here.
+    veda_pcc_base = cs1.Base[31..0];
+    veda_pcc_length = cs1.Length[15..0];
     // SSC: clear on every successful return too, the identical reason and
     // identical mechanism as VEDA_OCINVOKE above -- OCRETURN is a real,
     // general compartment-boundary crossing (not only used inside the
     // scheduler's own switcher pattern), so the same hardware guarantee
     // must hold unconditionally here as well, not just on the call side.
     veda_ssc_tag = false;
-    let target : xlenbits = zero_extend(cs1.Base) + zero_extend(cs1.Offset);
+    let target : xlenbits = veda_to_xlen(zero_extend(cs1.Base) + zero_extend(cs1.Offset));
     jump_to([target with 0 = bitzero])
   }
 }
@@ -792,7 +833,8 @@ function clause execute VEDA_CANDPERM(rs2, rs1, rd) = {
     Offset    = cap.Offset,
     Perms     = new_perms,
     otype     = cap.otype,
-    Reserved  = cap.Reserved,
+    generation = cap.generation,
+    flags      = cap.flags,
   };
   let rdno = vcapidx_to_vcapno(rd);
   wC(rdno, new_cap);

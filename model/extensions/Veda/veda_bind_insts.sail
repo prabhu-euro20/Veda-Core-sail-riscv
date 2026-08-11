@@ -63,6 +63,18 @@ let VEDA_CAUSE_OWNER_VIOLATION : bits(5) = 0b00110 // 0x06
 // vcapidx, since no real capability register is involved in either
 // triggering condition).
 let VEDA_CAUSE_PURECAP_VIOLATION : bits(5) = 0b00111 // 0x07
+// Phase 1 increment 2 (DESIGN_01 decision 2): a capability is now 32 bytes
+// and the memory tag granule widened to match, so OCL.C/OCS.C must be
+// 32-byte naturally aligned -- that alignment is the ONLY rule under which
+// "one capability occupies exactly one granule" is well-defined, and it is
+// what keeps a plain store from tampering with half a stored capability
+// while its tag survives. 0x08 is the next free cause value (verified
+// against every VEDA_CAUSE_* constant in this file before picking it, the
+// same discipline that once caught a real encoding collision). Hard trap,
+// not soft-fail: it joins the OCL/OCS Tag/Seal violation family, and a
+// misaligned capability spill is a compiler/ABI bug, not a recoverable
+// condition.
+let VEDA_CAUSE_CAP_MISALIGNED : bits(5) = 0b01000 // 0x08
 
 function veda_xtval(cap_idx : bits(4), cause : bits(5)) -> xlenbits = {
   // Deliberately avoids the two-argument `zero_extend(bits, width)` form --
@@ -106,13 +118,14 @@ mapping clause encdec = VEDA_BINDINST(mode, rs1, rd)
 
 function clause execute VEDA_BINDINST(mode_bits, rs1, rd) = {
   let mode = encdec_veda_bind_mode(mode_bits);
-  // Object_ID widened from 16 to 23 bits this pass (VEDA_CORE_SPEC.md
-  // Section 2/5.1, SCALING_BARRIERS_RESEARCH.md Section 3) -- rs1 is an
-  // ordinary GPR (Section 4 of the spec: chosen specifically so this
-  // width is never hardcoded into the instruction encoding), so this
-  // slice is the only place the width was actually hardcoded, and it
-  // still fits easily inside an xlenbits GPR value.
-  let object_id = X(rs1)[22..0];
+  // Object_ID is now 44 bits (Phase 1 increment 2, the 256-bit respec).
+  // rs1 is an ordinary GPR -- chosen originally so this width is never
+  // hardcoded into the instruction ENCODING -- so this slice is the only
+  // place the width is hardcoded at all, and 44 bits still fits easily
+  // inside an xlenbits GPR value on RV64 (the extension is RV64-gated;
+  // see DESIGN_01 decision 7).
+  let object_id_gpr64 : bits(64) = zero_extend(X(rs1));
+  let object_id = object_id_gpr64[43..0];
   let rdno = vcapidx_to_vcapno(rd);
   let e = odt_lookup(object_id);
   // Milestone 12 (VEDA_CORE_SPEC.md §4.1): an object with no live owner
@@ -155,14 +168,23 @@ function clause execute VEDA_BINDINST(mode_bits, rs1, rd) = {
         RETIRE_SUCCESS
       } else if e.valid & owner_ok then {
         odt_write(object_id, claimed_entry);
+        // Narrow-ODT -> wide-capability bridge (DESIGN_01 decision 6): the
+        // capability format widened this increment but the ODT entry
+        // deliberately did not, so Base/Length/generation are zero-extended
+        // from the entry's still-narrow domains. Lossless in both
+        // directions -- a 32-bit Base IS a valid 56-bit Base -- and the
+        // ODT's own widths remain the real limit until the separate
+        // ODT-Populate operand redesign lands. flags is minted as zeros
+        // (opaque/reserved this increment).
         wC(rdno, struct {
-          Object_ID = object_id,
-          Base      = e.Base,
-          Length    = e.Length,
-          Offset    = cur.Offset, // preserved across relocation, Section 4
-          Perms     = e.Perms,
-          otype     = UNSEALED_OTYPE,
-          Reserved  = e.generation,
+          Object_ID  = object_id,
+          Base       = zero_extend(e.Base),
+          Length     = zero_extend(e.Length),
+          Offset     = cur.Offset, // preserved across relocation, Section 4
+          Perms      = e.Perms,
+          otype      = UNSEALED_OTYPE,
+          generation = zero_extend(e.generation),
+          flags      = zeros(),
         });
         wCTag(rdno, true);
         RETIRE_SUCCESS
@@ -181,14 +203,17 @@ function clause execute VEDA_BINDINST(mode_bits, rs1, rd) = {
     _ => {
       if e.valid & owner_ok then {
         odt_write(object_id, claimed_entry);
+        // Same narrow-ODT -> wide-capability bridge as the Rebind path
+        // above (DESIGN_01 decision 6); fresh Bind starts at Offset 0.
         wC(rdno, struct {
-          Object_ID = object_id,
-          Base      = e.Base,
-          Length    = e.Length,
-          Offset    = zeros(),
-          Perms     = e.Perms,
-          otype     = UNSEALED_OTYPE,
-          Reserved  = e.generation,
+          Object_ID  = object_id,
+          Base       = zero_extend(e.Base),
+          Length     = zero_extend(e.Length),
+          Offset     = zeros(),
+          Perms      = e.Perms,
+          otype      = UNSEALED_OTYPE,
+          generation = zero_extend(e.generation),
+          flags      = zeros(),
         });
         wCTag(rdno, true);
         RETIRE_SUCCESS

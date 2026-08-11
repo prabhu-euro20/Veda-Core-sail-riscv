@@ -64,13 +64,21 @@ function veda_check_access(capidx : vcapno, offset : xlenbits, width : int, need
   let cap = C(capidx);
   let entry = odt_lookup(cap.Object_ID);
   if not(CTag(capidx)) then Err(veda_trap(vcapno_to_vcapidx(capidx), VEDA_CAUSE_TAG_VIOLATION))
-  else if not(entry.valid) | entry.generation != cap.Reserved then Err(veda_trap(vcapno_to_vcapidx(capidx), VEDA_CAUSE_TAG_VIOLATION))
+  else if not(entry.valid) | zero_extend(entry.generation) != cap.generation then Err(veda_trap(vcapno_to_vcapidx(capidx), VEDA_CAUSE_TAG_VIOLATION))
   else if isSealedCap(cap) then Err(veda_trap(vcapno_to_vcapidx(capidx), VEDA_CAUSE_SEAL_VIOLATION))
   else if need_load & not(permBit(cap.Perms, PERM_LOAD)) then Err(veda_trap(vcapno_to_vcapidx(capidx), VEDA_CAUSE_PERM_LOAD_VIOLATION))
   else if need_store & not(permBit(cap.Perms, PERM_STORE)) then Err(veda_trap(vcapno_to_vcapidx(capidx), VEDA_CAUSE_PERM_STORE_VIOLATION))
   else if unsigned(offset) + width > unsigned(cap.Length) then Err(veda_trap(vcapno_to_vcapidx(capidx), VEDA_CAUSE_BOUNDS_VIOLATION))
   else {
-    let real_loc : xlenbits = zero_extend(cap.Base) + offset;
+    // Phase 1 increment 2: Base is now 56 bits, so zero-extending it
+    // straight into xlenbits is ill-typed whenever xlen could be 32. The
+    // sum is computed in an explicit 64-bit domain and narrowed once via
+    // veda_to_xlen (DESIGN_01 decision 7: Ext_Veda is RV64-only, and the
+    // encdec's own xlen==64 guard is deliberately not visible to the type
+    // checker inside an execute body -- a lesson already recorded in this
+    // file for VEDA_NMC_ADD_D).
+    let real_loc64 : bits(64) = zero_extend(cap.Base) + zero_extend(offset);
+    let real_loc : xlenbits = veda_to_xlen(real_loc64);
     Ok(Physaddr(zero_extend(real_loc)))
   }
 }
@@ -134,13 +142,22 @@ mapping clause encdec = VEDA_OCS_C(rs2, rs1, rd)
 function clause execute VEDA_OCL_C(rs2, rs1, rd) = {
   let capidx = vcapidx_to_vcapno(rs1);
   let offset : xlenbits = X(rs2);
-  match veda_check_access(capidx, offset, 16, true, false) {
+  match veda_check_access(capidx, offset, 32, true, false) {
     Err(res) => res,
     Ok(paddr) => {
+      // 32-byte natural alignment is architectural as of the 256-bit
+      // respec (DESIGN_01 decision 2): one capability must occupy exactly
+      // one tag granule, otherwise a plain store could rewrite half a
+      // stored capability while the tag the load checks still reads 1.
+      // Checked after the capability's own validity checks, so a bad
+      // capability still reports its real reason first.
+      let Physaddr(pa) = paddr;
+      if pa[4 .. 0] != zeros() then veda_trap(rs1, VEDA_CAUSE_CAP_MISALIGNED)
+      else {
       // read_meta = true (unlike OCL.D/OCS.D's `false` above): this is the
       // one real access kind in this file that actually needs the
-      // memory-resident Tag, not just the 128 data bits.
-      let (data, tag) : (bits(128), mem_meta) = read_ram(Read_plain, paddr, 16, true);
+      // memory-resident Tag, not just the 256 data bits.
+      let (data, tag) : (bits(256), mem_meta) = read_ram(Read_plain, paddr, 32, true);
       let loaded_cap = veda_cap_unpack(data);
       C(rd) = loaded_cap;
       // A capability round-tripped through memory carries whatever Tag the
@@ -153,6 +170,7 @@ function clause execute VEDA_OCL_C(rs2, rs1, rd) = {
       // property, not assumed true just because the load succeeded.
       CTag(rd) = tag;
       RETIRE_SUCCESS
+      }
     },
   }
 }
@@ -160,20 +178,30 @@ function clause execute VEDA_OCL_C(rs2, rs1, rd) = {
 function clause execute VEDA_OCS_C(rs2, rs1, rd) = {
   let capidx = vcapidx_to_vcapno(rs1);
   let offset : xlenbits = X(rs2);
-  match veda_check_access(capidx, offset, 16, false, true) {
+  match veda_check_access(capidx, offset, 32, false, true) {
     Err(res) => res,
     Ok(paddr) => {
+      // 32-byte natural alignment is architectural as of the 256-bit
+      // respec (DESIGN_01 decision 2): one capability must occupy exactly
+      // one tag granule, otherwise a plain store could rewrite half a
+      // stored capability while the tag the load checks still reads 1.
+      // Checked after the capability's own validity checks, so a bad
+      // capability still reports its real reason first.
+      let Physaddr(pa) = paddr;
+      if pa[4 .. 0] != zeros() then veda_trap(rs1, VEDA_CAUSE_CAP_MISALIGNED)
+      else {
       let store_cap = C(rd);
       let store_tag = CTag(rd);
-      let packed : bits(128) = veda_cap_pack(store_cap);
+      let packed : bits(256) = veda_cap_pack(store_cap);
       // The store's own Tag is written to the tag store alongside the 128
       // data bits -- an untagged (CTag(rd)=false) capability register
       // still stores its raw field bits (matching CHERI's own real
       // behavior: storing an invalid capability is legal, it just can't
       // be loaded back as valid), but the tag store correctly records
       // "not a real capability" for those bytes.
-      let _ = write_ram(Write_plain, paddr, 16, packed, store_tag);
+      let _ = write_ram(Write_plain, paddr, 32, packed, store_tag);
       RETIRE_SUCCESS
+      }
     },
   }
 }
@@ -208,14 +236,23 @@ mapping clause assembly = VEDA_OCS_C(rs2, rs1, rd)
 function veda_check_nmc_access(capidx : vcapno, width : int) -> result(physaddr, ExecutionResult) = {
   let cap = C(capidx);
   let entry = odt_lookup(cap.Object_ID);
-  let offset : xlenbits = zero_extend(cap.Offset);
+  // Offset is 40 bits now -- widen through the explicit 64-bit domain.
+  let offset : xlenbits = veda_to_xlen(zero_extend(cap.Offset));
   if not(CTag(capidx)) then Err(veda_trap(vcapno_to_vcapidx(capidx), VEDA_CAUSE_TAG_VIOLATION))
-  else if not(entry.valid) | entry.generation != cap.Reserved then Err(veda_trap(vcapno_to_vcapidx(capidx), VEDA_CAUSE_TAG_VIOLATION))
+  else if not(entry.valid) | zero_extend(entry.generation) != cap.generation then Err(veda_trap(vcapno_to_vcapidx(capidx), VEDA_CAUSE_TAG_VIOLATION))
   else if isSealedCap(cap) then Err(veda_trap(vcapno_to_vcapidx(capidx), VEDA_CAUSE_SEAL_VIOLATION))
   else if not(permBit(cap.Perms, PERM_NMC_COMPUTE)) then Err(veda_trap(vcapno_to_vcapidx(capidx), VEDA_CAUSE_PERM_NMC_COMPUTE_VIOLATION))
   else if unsigned(offset) + width > unsigned(cap.Length) then Err(veda_trap(vcapno_to_vcapidx(capidx), VEDA_CAUSE_BOUNDS_VIOLATION))
   else {
-    let real_loc : xlenbits = zero_extend(cap.Base) + offset;
+    // Phase 1 increment 2: Base is now 56 bits, so zero-extending it
+    // straight into xlenbits is ill-typed whenever xlen could be 32. The
+    // sum is computed in an explicit 64-bit domain and narrowed once via
+    // veda_to_xlen (DESIGN_01 decision 7: Ext_Veda is RV64-only, and the
+    // encdec's own xlen==64 guard is deliberately not visible to the type
+    // checker inside an execute body -- a lesson already recorded in this
+    // file for VEDA_NMC_ADD_D).
+    let real_loc64 : bits(64) = zero_extend(cap.Base) + zero_extend(offset);
+    let real_loc : xlenbits = veda_to_xlen(real_loc64);
     Ok(Physaddr(zero_extend(real_loc)))
   }
 }
@@ -329,7 +366,11 @@ function veda_oda_authorized() -> bool =
 function clause execute VEDA_ODT_POPULATE(rs2, rs1, rd) = {
   if not(cur_privilege == Machine | veda_oda_authorized()) then Illegal_Instruction()
   else {
-    let object_id : bits(23) = X(rs1)[22..0];
+    // Sliced out of an explicit 64-bit widening: a direct X(..)[43..0]
+    // is not provably in range when xlen might be 32 (Ext_Veda is
+    // RV64-only, but that gate is invisible to the type checker here).
+    let object_id_gpr64 : bits(64) = zero_extend(X(rs1));
+    let object_id : bits(44) = object_id_gpr64[43..0];
     let descriptor : bits(64) = zero_extend(X(rs2));
     let old_entry = odt_lookup(object_id);
     // RTL Milestone 16 mirror (veda_types.sail's own `retired` field
@@ -378,7 +419,11 @@ function clause execute VEDA_ODT_POPULATE(rs2, rs1, rd) = {
 function clause execute VEDA_ODT_DESTROY(rs1, rd) = {
   if not(cur_privilege == Machine | veda_oda_authorized()) then Illegal_Instruction()
   else {
-    let object_id : bits(23) = X(rs1)[22..0];
+    // Sliced out of an explicit 64-bit widening: a direct X(..)[43..0]
+    // is not provably in range when xlen might be 32 (Ext_Veda is
+    // RV64-only, but that gate is invisible to the type checker here).
+    let object_id_gpr64 : bits(64) = zero_extend(X(rs1));
+    let object_id : bits(44) = object_id_gpr64[43..0];
     let old_entry = odt_lookup(object_id);
     // RTL Milestone 16: Destroy always bumps (unlike Populate, it is not
     // itself gated by `retired` -- destroying an already-retired slot is
@@ -442,7 +487,11 @@ mapping clause encdec = VEDA_ODT_POPULATE_FAST(rs2, rs1, rd)
 function clause execute VEDA_ODT_POPULATE_FAST(rs2, rs1, rd) = {
   if not(cur_privilege == Machine | veda_oda_authorized()) then Illegal_Instruction()
   else {
-    let object_id : bits(23) = X(rs1)[22..0];
+    // Sliced out of an explicit 64-bit widening: a direct X(..)[43..0]
+    // is not provably in range when xlen might be 32 (Ext_Veda is
+    // RV64-only, but that gate is invisible to the type checker here).
+    let object_id_gpr64 : bits(64) = zero_extend(X(rs1));
+    let object_id : bits(44) = object_id_gpr64[43..0];
     let base : bits(32) = X(rs2)[31..0];
     let old_entry = odt_lookup(object_id);
     if old_entry.retired then Illegal_Instruction()

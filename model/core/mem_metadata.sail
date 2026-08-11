@@ -31,8 +31,19 @@
 // an honest, stated scope boundary matching the identical discipline
 // already used for the RTL ODT's own 256-entry (not 8.4M-entry) scope
 // (`rtl/MILESTONE_PLAN.md`: "real silicon-area consciousness... explicitly
-// deferred, later work"). 16-byte (128-bit) granules, matching the
-// capability's own real width (VEDA_CORE_SPEC.md Section 2).
+// deferred, later work").
+//
+// 32-byte (256-bit) granules as of the Phase 1 increment 2 respec
+// (DESIGN_01 decision 1), matching the capability's own real width. The
+// granule tracks the capability width DELIBERATELY, not incidentally: the
+// tag is read as a single bit at the access's own granule, so if one
+// capability spanned two granules, a plain store could rewrite its second
+// half -- the half holding Perms, otype and generation -- while the tag the
+// load actually checks still read 1. That is a permission/generation
+// forgery primitive, so "one capability occupies exactly one granule" is a
+// security invariant rather than a convenience, and it is what makes the
+// 32-byte natural-alignment requirement on OCL.C/OCS.C load-bearing rather
+// than decorative. Region coverage is unchanged: 16384 x 32 = 0x80000.
 type mem_meta = bool
 
 let default_meta : mem_meta = false
@@ -45,7 +56,7 @@ let veda_tagstore_base   : bits(64) = 0x0000000080000000
 // that compile-time-constant guarantee, a real "Failed to prove
 // constraint" build error with the `let` form, confirmed by attempting it
 // first.
-type veda_tagstore_granules : Int = 32768  // 0x80000 bytes / 16 bytes per granule
+type veda_tagstore_granules : Int = 16384  // 0x80000 bytes / 32 bytes per granule
 // Same real idiom already used in this codebase (core/xlen.sail: `let
 // xlen = sizeof(xlen)`) for pulling a Kind-Int constant into value-level
 // int expressions -- a bare type-level identifier isn't usable directly
@@ -62,15 +73,15 @@ function veda_tagstore_index(addr : physaddrbits) -> option(int) = {
   let addr64 : bits(64) = zero_extend(addr);
   if unsigned(addr64) < unsigned(veda_tagstore_base) then None()
   else {
-    // Stay in bits(64) arithmetic (subtract, then shift right by 4 = /16,
-    // since 16 is a power of two -- the same real, natural technique real
+    // Stay in bits(64) arithmetic (subtract, then shift right by 5 = /32,
+    // since 32 is a power of two -- the same real, natural technique real
     // hardware would use for a fixed granule size) rather than plain-int
     // division, which Sail's dependent-type checker cannot statically
     // prove non-negative/well-founded here (a real "Could not resolve
     // quantifiers" build error, not assumed -- confirmed by actually
     // attempting the division form first).
     let byte_off : bits(64) = addr64 - veda_tagstore_base;
-    let granule : int = unsigned(byte_off >> 4);
+    let granule : int = unsigned(byte_off >> 5);
     if granule >= veda_tagstore_granules then None() else Some(granule)
   }
 }
