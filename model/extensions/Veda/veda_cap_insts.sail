@@ -745,3 +745,60 @@ mapping veda_scr_name : veda_scr <-> string = {
 
 mapping clause assembly = VEDA_OSPECIALRW(scr, rs1, rd)
   <-> "ospecialrw" ^ spc() ^ vcap_name(encdec_vcap(rd)) ^ sep() ^ veda_scr_name(scr) ^ sep() ^ vcap_name(encdec_vcap(rs1))
+
+// CAndPerm (Phase 1, DESIGN_01 "New instruction -- CAndPerm"): per-holder
+// monotonic rights attenuation -- cd = cs1 with Perms &= rs2 (a GPR-held
+// mask). Same R-type shape as OCA (rs2 = GPR, rs1/rd = Capability Register).
+//
+// funct7 = 0010111, the next free Custom-2/funct3=001 slot after OCRETURN's
+// 0010110 -- verified by full enumeration of this file before picking it
+// (OCA=0001010, CSetBounds=0001000, CSetBoundsExact=0001001, CSeal=0010000,
+// CUnseal=0010001, OCInvoke=0010010, OSpecialRW=0010011, OCJALR=0010100,
+// CSealEntry=0010101, OCRETURN=0010110), the same "next free slot, grep
+// first" discipline OCJALR/CSealEntry/OCRETURN each used.
+//
+// Why this instruction exists (DESIGN_01): without per-holder attenuation,
+// giving a domain a read-only view of a live object forces a SEPARATE
+// Object_ID aliasing the same Base -- which breaks temporal safety
+// (destroying one ID does not revoke the alias). CAndPerm derives a weaker
+// capability to the SAME live object (no new Object_ID, no aliasing), so a
+// later ODT-Destroy still revokes every view. Essential for the multi-
+// process rights model (read-only text/data shared to children).
+union clause instruction = VEDA_CANDPERM : (regidx, vcapidx, vcapidx)
+
+mapping clause encdec = VEDA_CANDPERM(rs2, rs1, rd)
+  <-> 0b0010111 @ encdec_reg(rs2) @ 0b0 @ encdec_vcap(rs1) @ 0b001 @ 0b0 @ encdec_vcap(rd) @ 0b1011011
+  when currentlyEnabled(Ext_Veda)
+
+// Semantics: bitwise AND is monotonic clear-only -- it can never GRANT a
+// permission, only remove one, so the result is unconditionally a subset of
+// cs1's rights by construction (no separate subset check needed). Soft-fail
+// exactly like the OCA/CSetBounds manipulate family: cd's fields are always
+// written, and the Tag is conditionally cleared -- here on an untagged or
+// already-sealed cs1 (a sealed capability's rights are frozen; an untagged
+// source can never produce a valid result, the same reasoning OCA applies).
+// No bounds term (unlike OCA/CSetBounds): masking Perms cannot produce an
+// out-of-window value, so the only soft-fail conditions are tag+seal.
+function clause execute VEDA_CANDPERM(rs2, rs1, rd) = {
+  let capidx = vcapidx_to_vcapno(rs1);
+  let cap = C(capidx);
+  let mask : xlenbits = X(rs2);
+  // Perms is bits(16) (veda_types.sail); AND with the low 16 mask bits.
+  let new_perms : bits(16) = cap.Perms & mask[15 .. 0];
+  let new_cap : capability = struct {
+    Object_ID = cap.Object_ID,
+    Base      = cap.Base,
+    Length    = cap.Length,
+    Offset    = cap.Offset,
+    Perms     = new_perms,
+    otype     = cap.otype,
+    Reserved  = cap.Reserved,
+  };
+  let rdno = vcapidx_to_vcapno(rd);
+  wC(rdno, new_cap);
+  wCTag(rdno, CTag(capidx) & not(isSealedCap(cap)));
+  RETIRE_SUCCESS
+}
+
+mapping clause assembly = VEDA_CANDPERM(rs2, rs1, rd)
+  <-> "candperm" ^ spc() ^ vcap_name(encdec_vcap(rd)) ^ sep() ^ vcap_name(encdec_vcap(rs1)) ^ sep() ^ reg_name(rs2)
