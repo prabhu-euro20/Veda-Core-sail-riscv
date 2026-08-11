@@ -454,15 +454,89 @@ register veda_odt : vector(8388608, odt_entry) = vector_init(empty_odt_entry)
 // reconciled by a real check rather than by assumption.
 let VEDA_ODT_MODELED_ENTRIES = 8388608
 
-function odt_lookup(object_id : bits(44)) -> odt_entry = {
-  let idx = unsigned(object_id);
-  if idx < VEDA_ODT_MODELED_ENTRIES then veda_odt[idx] else empty_odt_entry
+// DESIGN_08 Sail experiment -- domain-segmented Object_ID. The single flat
+// modeled ODT array (2^23 = VEDA_ODT_MODELED_ENTRIES entries) is partitioned
+// into VEDA_REGION_MODELED regions of VEDA_LOCAL_MODELED entries each
+// (8 x 2^20 = 2^23 exactly, so existing region-0 objects keep their old
+// indices and the whole prior corpus is unaffected). In real hardware each
+// region has its OWN physically-separate ODT and only resident ones consume
+// DRAM; here they are laid out contiguously in the one modeled array, and
+// `region_odt_base` is the base into it -- faithful, since region_odt_base is
+// exactly a base offset in the real design too.
+let VEDA_REGION_MODELED = 8
+let VEDA_LOCAL_MODELED  = 1048576  // 2^20 modeled objects per region; 8 x this = 2^23
+
+// The Region Table: flat, always-resident, one entry per modeled domain.
+register veda_region_table : vector(8, region_entry) = vector_init(empty_region_entry)
+
+// The Current-Region Base Register (CRBR, DESIGN_08 Section 4). Loaded at
+// domain entry (OCInvoke) exactly as veda_pcc_base is -- a single
+// architectural register, NOT a cache or TLB (no tags, no eviction, no
+// fill-on-miss, no access history). It lets a bind to an object in the
+// CURRENT domain skip the RT read entirely: intra-domain bind = one ODT read
+// (no regression from the pre-DESIGN_08 single flat table), only a
+// cross-domain bind pays the extra RT read. veda_current_region defaults to
+// region 0, so every pre-DESIGN_08 test (all region-0 objects) stays on the
+// one-read fast path and is byte-for-byte unaffected.
+register veda_current_region   : bits(20) = zeros()
+register veda_current_odt_base : bits(56) = zeros()
+
+// Resolve a region's ODT base: the CRBR for the current region (the fast
+// path, no RT read), the RT otherwise. Out-of-modeled-window regions get a
+// base that odt_lookup/odt_write will reject as not-found.
+function veda_odt_base_of(region : bits(20)) -> bits(56) = {
+  if region == veda_current_region then veda_current_odt_base
+  else {
+    let ru = unsigned(region);
+    if ru >= VEDA_REGION_MODELED then zeros() else veda_region_table[ru].region_odt_base
+  }
 }
 
-function odt_write(object_id : bits(44), e : odt_entry) -> unit = {
-  let idx = unsigned(object_id);
-  if idx < VEDA_ODT_MODELED_ENTRIES then veda_odt[idx] = e
+// Is a region resident (its ODT table paged in)? The current region always
+// is -- you cannot be executing in a domain whose table is not present. Any
+// other in-window region is resident iff its RT bit says so; out-of-window
+// regions are not modeled (handled as not-found, not as a fault).
+function veda_region_is_resident(region : bits(20)) -> bool = {
+  if region == veda_current_region then true
+  else {
+    let ru = unsigned(region);
+    if ru >= VEDA_REGION_MODELED then false else veda_region_table[ru].region_resident
+  }
 }
+
+// Two-step resolve: {region, local} -> a modeled global index, or None if
+// either falls outside its modeled window. Bounding BOTH region and local is
+// what guarantees global uniqueness -- a local that overflowed its window
+// would otherwise alias the next region's slots.
+function veda_odt_index(object_id : bits(44)) -> option(int) = {
+  let region = object_id[43 .. 24];
+  let local  = object_id[23 .. 0];
+  let ru = unsigned(region);
+  let lu = unsigned(local);
+  if (region != veda_current_region & ru >= VEDA_REGION_MODELED) | lu >= VEDA_LOCAL_MODELED
+  then None()
+  else {
+    let idx = unsigned(veda_odt_base_of(region)) + lu;
+    if idx < VEDA_ODT_MODELED_ENTRIES then Some(idx) else None()
+  }
+}
+
+// The assert re-establishes the in-bounds fact across the option boundary --
+// veda_odt_index already guarantees it, but that proof does not survive
+// through Some(idx), the identical "Failed to prove constraint" situation
+// core/mem_metadata.sail already solves this exact way (its assert(idx >= 0 &
+// idx < veda_tagstore_granules) before the tag-store access).
+function odt_lookup(object_id : bits(44)) -> odt_entry =
+  match veda_odt_index(object_id) {
+    Some(idx) => { assert(idx >= 0 & idx < VEDA_ODT_MODELED_ENTRIES); veda_odt[idx] },
+    None()    => empty_odt_entry,
+  }
+
+function odt_write(object_id : bits(44), e : odt_entry) -> unit =
+  match veda_odt_index(object_id) {
+    Some(idx) => { assert(idx >= 0 & idx < VEDA_ODT_MODELED_ENTRIES); veda_odt[idx] = e },
+    None()    => (),
+  }
 
 // Milestone V-A test scaffold, explicitly temporary (see
 // postlude/step_ext.sail's ext_reset, which calls this): seeds Object_ID=1
@@ -478,6 +552,22 @@ function odt_write(object_id : bits(44), e : odt_entry) -> unit = {
 // can also exercise NMC_ADD** -- Milestone V-B, veda_types.sail's bit
 // assignment.
 function veda_test_seed_odt() -> unit = {
+  // DESIGN_08 Sail experiment -- seed the Region Table FIRST, before any
+  // object, because a cross-region odt_write resolves its base through the
+  // RT. Region 0 = the current/default domain (its base is 0, so every
+  // pre-DESIGN_08 region-0 object keeps its old index via the CRBR fast
+  // path). Region 1 = a second RESIDENT domain, base 2^20, used to prove
+  // global uniqueness ({region=1,local=k} is a different object than
+  // {region=0,local=k}). Region 2 = a NON-RESIDENT domain, base 2^21, used
+  // to prove the explicit REGION_FAULT (its object exists in backing but its
+  // table is paged out). Regions 3-7 stay empty. The CRBR defaults to
+  // region 0 / base 0, matching veda_current_region/veda_current_odt_base's
+  // reset values.
+  veda_region_table[0] = struct { rt_valid = true,  region_odt_base = to_bits(56, 0),       region_resident = true,  region_backing = zeros(), region_generation = zeros() };
+  veda_region_table[1] = struct { rt_valid = true,  region_odt_base = to_bits(56, 1048576),  region_resident = true,  region_backing = zeros(), region_generation = zeros() };
+  veda_region_table[2] = struct { rt_valid = true,  region_odt_base = to_bits(56, 2097152),  region_resident = false, region_backing = zeros(), region_generation = zeros() };
+  veda_current_region   = zeros();       // region 0 is the running domain
+  veda_current_odt_base = to_bits(56, 0); // its ODT base
   // 0x0001 was a valid 16-bit literal before this pass's widening; now
   // that odt_write takes bits(23), the literal must be built explicitly
   // (a bare hex literal is sized by its digit count, 4 hex digits = 16
@@ -569,6 +659,35 @@ function veda_test_seed_odt() -> unit = {
     Length     = 0x0000000008,
     Perms      = 0x0004, // Permit_Load
     generation = 0xFFFFFE,
+    owner_hart = VEDA_OWNER_UNOWNED,
+    retired    = false,
+  });
+  // DESIGN_08 Sail experiment -- two cross-region seeds.
+  // (A) region=1, local=1: Object_ID = (1 << 24) | 1. Its region is RESIDENT
+  // (RT[1]), so it binds normally, but it is a DIFFERENT object than region-0
+  // local-1 (Object_ID 1, Base 0x...010000 above -- unowned/bindable, unlike
+  // Object_ID 5 which is the wrong-owner seed) -- given a distinct Base
+  // 0x...020000 so a test can prove {region=1,local=1} and {region=0,local=1}
+  // resolve to different objects (global uniqueness).
+  odt_write(to_bits(44, 16777217) /* (1 << 24) | 1 = region 1, local 1 */, struct {
+    valid      = true,
+    Base       = 0x00000080020000,
+    Length     = 0x0000000008,
+    Perms      = 0x0004, // Permit_Load
+    generation = zeros(),
+    owner_hart = VEDA_OWNER_UNOWNED,
+    retired    = false,
+  });
+  // (B) region=2, local=7: Object_ID = (2 << 24) | 7. Region 2 is NON-RESIDENT
+  // (RT[2].region_resident=false), so the object exists in the modeled backing
+  // but any Object-Bind of it must raise an explicit REGION_FAULT rather than
+  // silently resolving -- the cache-less / explicit-fault invariant.
+  odt_write(to_bits(44, 33554439) /* (2 << 24) | 7 = region 2, local 7 */, struct {
+    valid      = true,
+    Base       = 0x00000080030000,
+    Length     = 0x0000000008,
+    Perms      = 0x0004, // Permit_Load
+    generation = zeros(),
     owner_hart = VEDA_OWNER_UNOWNED,
     retired    = false,
   })

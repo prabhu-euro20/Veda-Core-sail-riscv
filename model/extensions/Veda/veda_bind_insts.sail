@@ -75,6 +75,15 @@ let VEDA_CAUSE_PURECAP_VIOLATION : bits(5) = 0b00111 // 0x07
 // misaligned capability spill is a compiler/ABI bug, not a recoverable
 // condition.
 let VEDA_CAUSE_CAP_MISALIGNED : bits(5) = 0b01000 // 0x08
+// DESIGN_08 -- a bind whose object lives in a domain (region) whose ODT is
+// not currently resident raises this bounded, EXPLICIT fault so the handler
+// can page the domain's table in and retry. It is deliberately distinct from
+// OBJECT_NOT_FOUND (0x05): not-found means the object never existed; a region
+// fault means it exists but its table is paged out (recoverable). 0x09 is the
+// next free cause value (verified against every VEDA_CAUSE_* in this file).
+// The whole point of the cache-less pillar is that this is a real trap, never
+// a silent miss.
+let VEDA_CAUSE_REGION_FAULT : bits(5) = 0b01001 // 0x09
 
 function veda_xtval(cap_idx : bits(4), cause : bits(5)) -> xlenbits = {
   // Deliberately avoids the two-argument `zero_extend(bits, width)` form --
@@ -127,6 +136,18 @@ function clause execute VEDA_BINDINST(mode_bits, rs1, rd) = {
   let object_id_gpr64 : bits(64) = zero_extend(X(rs1));
   let object_id = object_id_gpr64[43..0];
   let rdno = vcapidx_to_vcapno(rd);
+  // DESIGN_08 -- region residency gate, BEFORE the ODT lookup. If the object's
+  // domain (region = Object_ID[43:24]) is not resident, Object-Bind raises an
+  // explicit REGION_FAULT and does not proceed -- a bounded, recoverable event
+  // (page the domain in and retry), never a silent resolution. The current
+  // domain is always resident (you are executing in it), so intra-domain binds
+  // -- every pre-DESIGN_08 object, all region 0 -- never take this path. This
+  // is a hard trap for ALL bind modes on purpose: a paged-out region is not a
+  // "manipulate" soft-fail condition (Tag-clear would wrongly report
+  // not-found); it must fault to the pager regardless of mode.
+  let region = object_id[43 .. 24];
+  if not(veda_region_is_resident(region)) then veda_trap(rd, VEDA_CAUSE_REGION_FAULT)
+  else {
   let e = odt_lookup(object_id);
   // Milestone 12 (VEDA_CORE_SPEC.md §4.1): an object with no live owner
   // yet, or one this same hart already owns, is fair game -- claiming it
@@ -237,6 +258,7 @@ function clause execute VEDA_BINDINST(mode_bits, rs1, rd) = {
       }
     },
   }
+  }  // close the DESIGN_08 region-residency `else`
 }
 
 mapping veda_bind_mnemonic : veda_bind_mode <-> string = {

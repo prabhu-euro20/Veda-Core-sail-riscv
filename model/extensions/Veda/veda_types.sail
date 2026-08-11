@@ -303,6 +303,34 @@ let empty_odt_entry : odt_entry = struct {
   retired    = false,
 }
 
+// DESIGN_08 -- the Object-namespace scale decision. A Region Table (RT)
+// entry, one per protection domain (region). The 44-bit Object_ID is split
+// {region:20, local:24}: the region names a domain, the local names an
+// object within it. The RT is small, flat and always resident (it maps the
+// bounded set of domains); each domain's own per-region ODT is what
+// demand-pages. `region_odt_base` is the base offset of this domain's ODT
+// storage (a real physical DRAM base in hardware; in this bounded Sail model
+// it is the base into the single modeled ODT array). `region_resident` is
+// the load-bearing bit: accessing a non-resident region is a bounded,
+// explicit REGION_FAULT (page the domain's table in), never a silent miss --
+// the cache-less pillar. `region_generation` retires a region id under churn
+// exactly as odt_entry.generation retires an object id.
+struct region_entry = {
+  rt_valid          : bool,
+  region_odt_base   : bits(56),
+  region_resident   : bool,
+  region_backing    : bits(56),
+  region_generation : bits(24),
+}
+
+let empty_region_entry : region_entry = struct {
+  rt_valid          = false,
+  region_odt_base   = zeros(),
+  region_resident   = false,
+  region_backing    = zeros(),
+  region_generation = zeros(),
+}
+
 // Milestone V-B: Veda-Atomic's op-select enum (VEDA_CORE_SPEC.md Section 1)
 // -- moved here, not left in veda_atomic_insts.sail, for the identical
 // real reason vcapidx lives in this `before sys`-ordered module and not
