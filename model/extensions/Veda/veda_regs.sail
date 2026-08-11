@@ -550,5 +550,26 @@ function veda_test_seed_odt() -> unit = {
     generation = zeros(),
     owner_hart = 0x63, // 99 decimal -- a real, distinct, non-zero "other hart"
     retired    = false,
+  });
+  // Phase 1 increment 4: a sixth seeded object whose generation counter is
+  // placed ONE below the real 24-bit retirement threshold (0xFFFFFE, i.e.
+  // 0xFFFFFF - 1). This is the direct-state-injection answer to "how do you
+  // test a 16.7M-reuse threshold" -- looping 16.7M destroys is infeasible, so
+  // the slot is seeded near the boundary and a test drives the genuine
+  // saturate-then-retire transition at the TRUE width with two destroys:
+  // Destroy #1 bumps 0xFFFFFE -> 0xFFFFFF (saturated, not yet retired),
+  // Destroy #2 sees the counter already at max and retires the slot. This
+  // exercises the real threshold arithmetic, not a reduced stand-in, using
+  // the identical reset-scaffold technique every seed above already relies
+  // on (none is populated by a real ODT-Populate instruction either).
+  // Object_ID=55, clear of the 1-5 seeds and the tests' own 50/51/60.
+  odt_write(to_bits(44, 55), struct {
+    valid      = true,
+    Base       = 0x00000080010500,
+    Length     = 0x0000000008,
+    Perms      = 0x0004, // Permit_Load
+    generation = 0xFFFFFE,
+    owner_hart = VEDA_OWNER_UNOWNED,
+    retired    = false,
   })
 }

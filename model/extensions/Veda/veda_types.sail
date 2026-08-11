@@ -253,13 +253,22 @@ struct odt_entry = {
   Base       : bits(56),
   Length     : bits(40),
   Perms      : bits(16),
-  // generation stays 8 bits THIS increment, deliberately. It is genuinely
-  // independent of Base/Length (the capability's own 24-bit generation is
-  // fed by a lossless zero-extend), and widening it moves the retirement
-  // threshold from 256 to ~16.7M destroy/reuse cycles, which the existing
-  // saturation tests reach by looping. That needs its own increment and its
-  // own answer for how to test a threshold too large to loop to.
-  generation : bits(8),
+  // Phase 1 increment 4: generation 8 -> 24 bits, matching the capability's
+  // own generation field so the last narrow-to-wide bridge is gone. This is
+  // where the 255-reuse RETIREMENT wall falls: a slot could previously be
+  // destroyed/repopulated only 255 times before permanent retirement (the
+  // 8-bit counter would otherwise wrap and revive a stale capability, a real
+  // bug reproduced on RTL, Milestone 16). At 24 bits the threshold is
+  // ~16.7M reuse cycles per slot.
+  //
+  // Testing a 16.7M threshold cannot be done by looping to it. It is instead
+  // exercised by direct ODT-state injection -- the same reset-scaffold
+  // mechanism veda_test_seed_odt() already uses for every other seeded
+  // object, and the same technique the RTL uses for owner-hart tests it has
+  // no second hart to produce. A seed placed ONE below the real threshold
+  // (0xFFFFFE) lets a test drive the genuine saturate-then-retire boundary
+  // at the true 24-bit width with two destroys, not a reduced stand-in.
+  generation : bits(24),
   owner_hart : bits(8),
   // Mirrors RTL Milestone 16 (rtl/MILESTONE_16_RESULTS.md,
   // veda-core/ARCHITECTURE_IMPROVEMENT_FINDINGS.md Finding 2): the

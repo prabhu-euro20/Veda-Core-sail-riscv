@@ -64,7 +64,7 @@ function veda_check_access(capidx : vcapno, offset : xlenbits, width : int, need
   let cap = C(capidx);
   let entry = odt_lookup(cap.Object_ID);
   if not(CTag(capidx)) then Err(veda_trap(vcapno_to_vcapidx(capidx), VEDA_CAUSE_TAG_VIOLATION))
-  else if not(entry.valid) | zero_extend(entry.generation) != cap.generation then Err(veda_trap(vcapno_to_vcapidx(capidx), VEDA_CAUSE_TAG_VIOLATION))
+  else if not(entry.valid) | entry.generation != cap.generation then Err(veda_trap(vcapno_to_vcapidx(capidx), VEDA_CAUSE_TAG_VIOLATION))
   else if isSealedCap(cap) then Err(veda_trap(vcapno_to_vcapidx(capidx), VEDA_CAUSE_SEAL_VIOLATION))
   else if need_load & not(permBit(cap.Perms, PERM_LOAD)) then Err(veda_trap(vcapno_to_vcapidx(capidx), VEDA_CAUSE_PERM_LOAD_VIOLATION))
   else if need_store & not(permBit(cap.Perms, PERM_STORE)) then Err(veda_trap(vcapno_to_vcapidx(capidx), VEDA_CAUSE_PERM_STORE_VIOLATION))
@@ -239,7 +239,7 @@ function veda_check_nmc_access(capidx : vcapno, width : int) -> result(physaddr,
   // Offset is 40 bits now -- widen through the explicit 64-bit domain.
   let offset : xlenbits = veda_to_xlen(zero_extend(cap.Offset));
   if not(CTag(capidx)) then Err(veda_trap(vcapno_to_vcapidx(capidx), VEDA_CAUSE_TAG_VIOLATION))
-  else if not(entry.valid) | zero_extend(entry.generation) != cap.generation then Err(veda_trap(vcapno_to_vcapidx(capidx), VEDA_CAUSE_TAG_VIOLATION))
+  else if not(entry.valid) | entry.generation != cap.generation then Err(veda_trap(vcapno_to_vcapidx(capidx), VEDA_CAUSE_TAG_VIOLATION))
   else if isSealedCap(cap) then Err(veda_trap(vcapno_to_vcapidx(capidx), VEDA_CAUSE_SEAL_VIOLATION))
   else if not(permBit(cap.Perms, PERM_NMC_COMPUTE)) then Err(veda_trap(vcapno_to_vcapidx(capidx), VEDA_CAUSE_PERM_NMC_COMPUTE_VIOLATION))
   else if unsigned(offset) + width > unsigned(cap.Length) then Err(veda_trap(vcapno_to_vcapidx(capidx), VEDA_CAUSE_BOUNDS_VIOLATION))
@@ -392,10 +392,10 @@ function clause execute VEDA_ODT_POPULATE(rs2, rs1, rd) = {
       // wrapping back to 0 -- `new_retired` (below) is what actually
       // stops the slot from ever being reused once this point is
       // reached.
-      let new_generation : bits(8) =
-        if old_entry.valid then (if old_entry.generation == 0xff then 0xff else old_entry.generation + 1)
+      let new_generation : bits(24) =
+        if old_entry.valid then (if old_entry.generation == 0xffffff then 0xffffff else old_entry.generation + 1)
         else old_entry.generation;
-      let new_retired : bool = old_entry.valid & (old_entry.generation == 0xff);
+      let new_retired : bool = old_entry.valid & (old_entry.generation == 0xffffff);
       odt_write(object_id, struct {
         valid      = true,
         // Increment 3: plain Populate keeps its packed single-GPR
@@ -439,8 +439,8 @@ function clause execute VEDA_ODT_DESTROY(rs1, rd) = {
     // harmless, it just stays invalid and retired), but the same
     // freeze-at-0xff-and-retire rule applies once the counter is
     // exhausted.
-    let new_generation : bits(8) = if old_entry.generation == 0xff then 0xff else old_entry.generation + 1;
-    let new_retired : bool = old_entry.retired | (old_entry.generation == 0xff);
+    let new_generation : bits(24) = if old_entry.generation == 0xffffff then 0xffffff else old_entry.generation + 1;
+    let new_retired : bool = old_entry.retired | (old_entry.generation == 0xffffff);
     odt_write(object_id, struct {
       valid      = false,
       Base       = old_entry.Base,
@@ -510,10 +510,10 @@ function clause execute VEDA_ODT_POPULATE_FAST(rs2, rs1, rd) = {
     let old_entry = odt_lookup(object_id);
     if old_entry.retired then Illegal_Instruction()
     else {
-      let new_generation : bits(8) =
-        if old_entry.valid then (if old_entry.generation == 0xff then 0xff else old_entry.generation + 1)
+      let new_generation : bits(24) =
+        if old_entry.valid then (if old_entry.generation == 0xffffff then 0xffffff else old_entry.generation + 1)
         else old_entry.generation;
-      let new_retired : bool = old_entry.valid & (old_entry.generation == 0xff);
+      let new_retired : bool = old_entry.valid & (old_entry.generation == 0xffffff);
       odt_write(object_id, struct {
         valid      = true,
         Base       = base,

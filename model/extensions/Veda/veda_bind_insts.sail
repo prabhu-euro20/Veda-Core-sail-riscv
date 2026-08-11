@@ -180,7 +180,7 @@ function clause execute VEDA_BINDINST(mode_bits, rs1, rd) = {
           Offset     = cur.Offset, // preserved across relocation, Section 4
           Perms      = e.Perms,
           otype      = UNSEALED_OTYPE,
-          generation = zero_extend(e.generation),
+          generation = e.generation,  // now same width (24) -- no bridge needed
           flags      = zeros(),
         });
         wCTag(rdno, true);
@@ -208,7 +208,7 @@ function clause execute VEDA_BINDINST(mode_bits, rs1, rd) = {
           Offset     = zeros(),
           Perms      = e.Perms,
           otype      = UNSEALED_OTYPE,
-          generation = zero_extend(e.generation),
+          generation = e.generation,  // now same width (24) -- no bridge needed
           flags      = zeros(),
         });
         wCTag(rdno, true);
