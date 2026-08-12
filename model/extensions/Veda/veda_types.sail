@@ -291,6 +291,29 @@ struct odt_entry = {
   // empirically demonstrated exploit on its own RTL, not merely a
   // theoretical risk.
   retired    : bool,
+  // DESIGN_02 (Phase 2, increment 1) -- is this object's BACKING MEMORY
+  // present? First of the three fields that promote the ODT from a
+  // protection table into the machine's whole memory map: with `resident`,
+  // plus `backing` and `cow` in later increments, one object-indexed
+  // structure does what a page table, a VMA list and a swap map jointly do
+  // elsewhere. No TLB, no Sv39, no satp.
+  //
+  // Deliberately DISTINCT from region_entry's `region_resident`, and the
+  // distinction is why this must be a separate field rather than a reuse:
+  // region residency governs whether a domain's ODT *table* is paged in;
+  // object residency governs whether this object's *contents* are. They
+  // fault with different causes (0x09 vs 0x0A) because they demand
+  // different repair from the handler -- conflating them would send the
+  // pager after the wrong thing entirely.
+  //
+  // NOT mirrored into the capability's `flags` bits, deliberately. The
+  // flags comment above floats a "residency-mirror" as a candidate tenant;
+  // that option is refused here, because a residency bit cached in a
+  // register is exactly the stale-cache hazard this field exists to close.
+  // A register claiming "resident" while the table says otherwise is
+  // strictly worse than no bit at all. Residency is table-only, read fresh
+  // on every use.
+  resident   : bool,
 }
 
 let empty_odt_entry : odt_entry = struct {
@@ -301,6 +324,10 @@ let empty_odt_entry : odt_entry = struct {
   generation = zeros(),
   owner_hart = VEDA_OWNER_UNOWNED,
   retired    = false,
+  // A never-populated slot is non-resident. Correct -- and also precisely
+  // why check ORDER is load-bearing: such a slot is now BOTH invalid and
+  // non-resident, and "never existed" must keep winning over "paged out".
+  resident   = false,
 }
 
 // DESIGN_08 -- the Object-namespace scale decision. A Region Table (RT)

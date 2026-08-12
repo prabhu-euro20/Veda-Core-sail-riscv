@@ -745,6 +745,7 @@ function veda_test_seed_odt() -> unit = {
     generation = zeros(),
     owner_hart = VEDA_OWNER_UNOWNED,
     retired    = false,
+    resident   = true,   // DESIGN_02: seeded objects are present in memory
   });
   // Milestone V-B addition: a second seeded object, deliberately *without*
   // Permit_NMC_Compute (Perms = 0x000C, Load+Store only), so a real
@@ -758,6 +759,7 @@ function veda_test_seed_odt() -> unit = {
     generation = zeros(),
     owner_hart = VEDA_OWNER_UNOWNED,
     retired    = false,
+    resident   = true,   // DESIGN_02: seeded objects are present in memory
   });
   // Milestone V-B addition: a third seeded object for use as a CSeal/
   // CUnseal type-authority capability -- Perms = 0x300 (Permit_Seal, bit
@@ -772,6 +774,7 @@ function veda_test_seed_odt() -> unit = {
     generation = zeros(),
     owner_hart = VEDA_OWNER_UNOWNED,
     retired    = false,
+    resident   = true,   // DESIGN_02: seeded objects are present in memory
   });
   // Milestone V-B addition: a fourth seeded object identical to Object_ID
   // 3 except *without* Permit_Seal/Permit_Unseal, so a real negative test
@@ -784,6 +787,7 @@ function veda_test_seed_odt() -> unit = {
     generation = zeros(),
     owner_hart = VEDA_OWNER_UNOWNED,
     retired    = false,
+    resident   = true,   // DESIGN_02: seeded objects are present in memory
   });
   // Milestone 12 addition: a fifth seeded object, pre-claimed by a
   // hypothetical OTHER hart (99 -- distinct from this real, single-
@@ -804,6 +808,35 @@ function veda_test_seed_odt() -> unit = {
     generation = zeros(),
     owner_hart = 0x63, // 99 decimal -- a real, distinct, non-zero "other hart"
     retired    = false,
+    // DESIGN_02: resident, so the wrong-owner fixture keeps reporting
+    // OWNER_VIOLATION (0x06). A non-resident value here would be
+    // indistinguishable in the test but wrong in meaning -- this object is
+    // present in memory, it simply belongs to another hart.
+    resident   = true,
+  });
+  // ── DESIGN_02 residency fixtures ────────────────────────────────────
+  // Object_ID 600: an object that EXISTS (valid, sane Base/Length/Perms)
+  // but whose contents are NOT in memory. Reset-seeded for the same reason
+  // the region-2 capabilities are: a non-resident object cannot be reached
+  // at runtime, because Populate is precisely the instruction that
+  // ESTABLISHES residency -- so no instruction sequence can produce one.
+  // That is the mechanism working, not a test inconvenience. This models
+  // the real state after a pager has evicted an object's contents.
+  //
+  // 600 chosen after grepping the whole corpus for every Object_ID literal.
+  // Deliberately NOT a low id: 6 is vc_bind_notfound_neg.S's never-populated
+  // fixture, and seeding it would flip that test's expected OBJECT_NOT_FOUND
+  // (0x05) into a residency fault -- the exact ordering confusion this
+  // increment is trying to keep straight.
+  odt_write(to_bits(44, 600), struct {
+    valid      = true,
+    Base       = 0x00000080010500,
+    Length     = 0x0000000040,
+    Perms      = 0x000C, // Load|Store -- nothing about perms is at issue here
+    generation = zeros(),
+    owner_hart = VEDA_OWNER_UNOWNED,
+    retired    = false,
+    resident   = false,  // THE fixture: the object exists, but is paged out
   });
   // Phase 1 increment 4: a sixth seeded object whose generation counter is
   // placed ONE below the real 24-bit retirement threshold (0xFFFFFE, i.e.
@@ -825,6 +858,7 @@ function veda_test_seed_odt() -> unit = {
     generation = 0xFFFFFE,
     owner_hart = VEDA_OWNER_UNOWNED,
     retired    = false,
+    resident   = true,   // DESIGN_02: seeded objects are present in memory
   });
   // DESIGN_08 Sail experiment -- two cross-region seeds.
   // (A) region=1, local=1: Object_ID = (1 << 24) | 1. Its region is RESIDENT
@@ -841,6 +875,7 @@ function veda_test_seed_odt() -> unit = {
     generation = zeros(),
     owner_hart = VEDA_OWNER_UNOWNED,
     retired    = false,
+    resident   = true,   // DESIGN_02: seeded objects are present in memory
   });
   // (B) region=2, local=7: Object_ID = (2 << 24) | 7. Region 2 is NON-RESIDENT
   // (RT[2].region_resident=false), so the object exists in the modeled backing
@@ -854,6 +889,7 @@ function veda_test_seed_odt() -> unit = {
     generation = zeros(),
     owner_hart = VEDA_OWNER_UNOWNED,
     retired    = false,
+    resident   = true,   // DESIGN_02: seeded objects are present in memory
   });
   // ── R10 test scaffold: three CRF seeds naming region 2 ──────────────
   // A region-2 capability CANNOT be obtained at runtime, and that is the
@@ -926,5 +962,35 @@ function veda_test_seed_odt() -> unit = {
     generation = zeros(),
     flags      = zeros(),
   });
-  wCTag(Vcapno(14), true)
+  wCTag(Vcapno(14), true);
+  // ── DESIGN_02 residency fixture: a capability held across an eviction ──
+  // c12 names Object_ID 600, which is seeded valid with generation 0 but
+  // resident = false. This is the ONLY way to reach the dereference-side
+  // residency gate: no instruction sequence can produce such a capability,
+  // because Bind is residency-gated and Populate is precisely what
+  // establishes residency. That is the mechanism working, not a test
+  // inconvenience -- and it is exactly the legal, reachable state of a
+  // capability minted while an object was resident and still held after a
+  // pager evicted its contents.
+  //
+  // Deliberately well-formed in EVERY other respect -- tagged, unsealed,
+  // generation matching the entry, Load|Store permitted, Length covering an
+  // in-bounds access -- so it passes all five earlier checks in
+  // veda_check_access and residency is the FIRST and ONLY thing that can
+  // stop it. A fixture that failed an earlier check would prove nothing
+  // about this gate.
+  //
+  // c12 chosen after grepping the corpus: its every read is preceded by a
+  // write on the immediately-previous line, so seeding it disturbs nothing.
+  wC(Vcapno(12), struct {
+    Object_ID  = to_bits(44, 600),
+    Base       = 0x00000080010500,  // matches Object_ID 600's seeded Base
+    Length     = 0x0000000040,
+    Offset     = zeros(),
+    Perms      = 0x000C,            // Load|Store
+    otype      = UNSEALED_OTYPE,
+    generation = zeros(),           // matches the entry -- no staleness
+    flags      = zeros(),
+  });
+  wCTag(Vcapno(12), true)
 }

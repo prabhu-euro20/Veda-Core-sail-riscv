@@ -69,6 +69,36 @@ function veda_check_access(capidx : vcapno, offset : xlenbits, width : int, need
   else if need_load & not(permBit(cap.Perms, PERM_LOAD)) then Err(veda_trap(vcapno_to_vcapidx(capidx), VEDA_CAUSE_PERM_LOAD_VIOLATION))
   else if need_store & not(permBit(cap.Perms, PERM_STORE)) then Err(veda_trap(vcapno_to_vcapidx(capidx), VEDA_CAUSE_PERM_STORE_VIOLATION))
   else if unsigned(offset) + width > unsigned(cap.Length) then Err(veda_trap(vcapno_to_vcapidx(capidx), VEDA_CAUSE_BOUNDS_VIOLATION))
+  // DESIGN_02 -- OBJECT residency, checked HERE and not only at Bind. This
+  // term closes a real hole, and it is free: `entry` is already read above,
+  // so it costs no additional ODT access. (Both dereference checkers carry
+  // this identically -- keep them textually parallel so they stay diffable.)
+  //
+  // Why bind-only would be unsound. The address below is computed from
+  // `cap.Base` -- the capability's CACHED copy -- never from entry.Base. A
+  // page-out that frees this object's frame and reassigns it elsewhere is
+  // therefore invisible to this path: `valid` stays true (the object still
+  // exists), and `generation` is bumped only by Populate and Destroy, never
+  // by paging. So a capability minted while the object was resident and
+  // held across a page-out would read and write whatever now occupies that
+  // memory. The codebase already records that held-across-page-out state as
+  // legal and reachable for regions; for objects it is worse, because it is
+  // the contents themselves that moved.
+  //
+  // The DESIGN_08 region precedent deliberately does NOT transfer. Region
+  // residency governs whether a domain's TABLE is paged in -- and by the
+  // time control reaches here the capability has already cached everything
+  // it needs from that table, so the table's absence changes nothing about
+  // this access. Object residency governs the BACKING MEMORY the cached
+  // Base points at. Same word, different referent, opposite conclusion.
+  //
+  // Placed LAST among the entry-derived checks, matching the rule OCInvoke's
+  // region gate already established: a capability that is untagged, stale,
+  // sealed, unpermitted or out of bounds still reports its own real cause,
+  // and RESIDENCY_FAULT is raised only for an access that would otherwise
+  // have SUCCEEDED. That is exactly what a resumable pager fault should
+  // mean -- page the object in, re-execute, proceed.
+  else if not(entry.resident) then Err(veda_trap(vcapno_to_vcapidx(capidx), VEDA_CAUSE_RESIDENCY_FAULT))
   else {
     // Phase 1 increment 2: Base is now 56 bits, so zero-extending it
     // straight into xlenbits is ill-typed whenever xlen could be 32. The
@@ -243,6 +273,36 @@ function veda_check_nmc_access(capidx : vcapno, width : int) -> result(physaddr,
   else if isSealedCap(cap) then Err(veda_trap(vcapno_to_vcapidx(capidx), VEDA_CAUSE_SEAL_VIOLATION))
   else if not(permBit(cap.Perms, PERM_NMC_COMPUTE)) then Err(veda_trap(vcapno_to_vcapidx(capidx), VEDA_CAUSE_PERM_NMC_COMPUTE_VIOLATION))
   else if unsigned(offset) + width > unsigned(cap.Length) then Err(veda_trap(vcapno_to_vcapidx(capidx), VEDA_CAUSE_BOUNDS_VIOLATION))
+  // DESIGN_02 -- OBJECT residency, checked HERE and not only at Bind. This
+  // term closes a real hole, and it is free: `entry` is already read above,
+  // so it costs no additional ODT access. (Both dereference checkers carry
+  // this identically -- keep them textually parallel so they stay diffable.)
+  //
+  // Why bind-only would be unsound. The address below is computed from
+  // `cap.Base` -- the capability's CACHED copy -- never from entry.Base. A
+  // page-out that frees this object's frame and reassigns it elsewhere is
+  // therefore invisible to this path: `valid` stays true (the object still
+  // exists), and `generation` is bumped only by Populate and Destroy, never
+  // by paging. So a capability minted while the object was resident and
+  // held across a page-out would read and write whatever now occupies that
+  // memory. The codebase already records that held-across-page-out state as
+  // legal and reachable for regions; for objects it is worse, because it is
+  // the contents themselves that moved.
+  //
+  // The DESIGN_08 region precedent deliberately does NOT transfer. Region
+  // residency governs whether a domain's TABLE is paged in -- and by the
+  // time control reaches here the capability has already cached everything
+  // it needs from that table, so the table's absence changes nothing about
+  // this access. Object residency governs the BACKING MEMORY the cached
+  // Base points at. Same word, different referent, opposite conclusion.
+  //
+  // Placed LAST among the entry-derived checks, matching the rule OCInvoke's
+  // region gate already established: a capability that is untagged, stale,
+  // sealed, unpermitted or out of bounds still reports its own real cause,
+  // and RESIDENCY_FAULT is raised only for an access that would otherwise
+  // have SUCCEEDED. That is exactly what a resumable pager fault should
+  // mean -- page the object in, re-execute, proceed.
+  else if not(entry.resident) then Err(veda_trap(vcapno_to_vcapidx(capidx), VEDA_CAUSE_RESIDENCY_FAULT))
   else {
     // Phase 1 increment 2: Base is now 56 bits, so zero-extending it
     // straight into xlenbits is ill-typed whenever xlen could be 32. The
@@ -418,6 +478,15 @@ function clause execute VEDA_ODT_POPULATE(rs2, rs1, rd) = {
         // milestone) -- stated here rather than left silently undone.
         owner_hart = VEDA_OWNER_UNOWNED,
         retired    = new_retired,
+        // DESIGN_02: a populate ESTABLISHES residency. Explicit `true`, not
+        // a carry-over: Populate/Populate-Fast is exactly how the residency
+        // handler repairs a fault -- DESIGN_02's own flow is "fetches
+        // contents from backing, allocates physical Base (ODT-Populate
+        // -Fast), sets resident, and resumes". It supplies a fresh Base, so
+        // by construction the contents it names are present. Carrying the
+        // old value over would leave a just-populated object faulting
+        // forever, which is why this is spelled out rather than inherited.
+        resident   = true,
       });
       X(rd) = zeros();
       RETIRE_SUCCESS
@@ -449,6 +518,14 @@ function clause execute VEDA_ODT_DESTROY(rs1, rd) = {
       generation = new_generation,
       owner_hart = VEDA_OWNER_UNOWNED,
       retired    = new_retired,
+      // DESIGN_02: a destroyed object has no physical backing, so it is not
+      // resident. Deliberately NOT observable as a residency fault, and that
+      // is correct: `valid = false` above already traps first at the
+      // dereference re-check, so a destroyed object keeps reporting the
+      // stale-capability cause rather than inviting a pager to resurrect
+      // something that was deliberately revoked. Set for state hygiene, so
+      // no path can ever read a stale `resident = true` off a dead slot.
+      resident   = false,
     });
     X(rd) = zeros();
     RETIRE_SUCCESS
@@ -529,6 +606,15 @@ function clause execute VEDA_ODT_POPULATE_FAST(rs2, rs1, rd) = {
         generation = new_generation,
         owner_hart = VEDA_OWNER_UNOWNED,
         retired    = new_retired,
+        // DESIGN_02: a populate ESTABLISHES residency. Explicit `true`, not
+        // a carry-over: Populate/Populate-Fast is exactly how the residency
+        // handler repairs a fault -- DESIGN_02's own flow is "fetches
+        // contents from backing, allocates physical Base (ODT-Populate
+        // -Fast), sets resident, and resumes". It supplies a fresh Base, so
+        // by construction the contents it names are present. Carrying the
+        // old value over would leave a just-populated object faulting
+        // forever, which is why this is spelled out rather than inherited.
+        resident   = true,
       });
       X(rd) = zeros();
       RETIRE_SUCCESS

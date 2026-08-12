@@ -84,6 +84,27 @@ let VEDA_CAUSE_CAP_MISALIGNED : bits(5) = 0b01000 // 0x08
 // The whole point of the cache-less pillar is that this is a real trap, never
 // a silent miss.
 let VEDA_CAUSE_REGION_FAULT : bits(5) = 0b01001 // 0x09
+// DESIGN_02 (Phase 2, increment 1) -- the OBJECT-level twin of the region
+// fault above, and deliberately a SEPARATE cause rather than a reuse. The
+// two say different things to the handler and demand different repair:
+//   0x09 REGION_FAULT    -- the domain's ODT *table* is paged out. Page the
+//                           table in; the object's contents were never gone.
+//   0x0A RESIDENCY_FAULT -- the object EXISTS and its table is present, but
+//                           its *contents* are not in memory. Fetch them
+//                           from `backing`, allocate a physical Base, set
+//                           resident, retry.
+// Collapsing them into one cause would send the pager after the wrong thing.
+// Both are equally distinct from OBJECT_NOT_FOUND (0x05), which means the
+// object never existed and is NOT recoverable.
+//
+// This is the cache-less pillar applied to demand paging: a miss is an
+// explicit, bounded, architecturally-visible trap -- never a silent stall
+// whose latency leaks which objects were resident.
+//
+// 0x0A verified free against every VEDA_CAUSE_* in this file before use.
+// (VEDA_CORE_SPEC.md Section 3's cause table still calls 0x08-0x0f reserved
+// and is now stale by three values: 0x08, 0x09 and this one.)
+let VEDA_CAUSE_RESIDENCY_FAULT : bits(5) = 0b01010 // 0x0A
 
 function veda_xtval(cap_idx : bits(4), cause : bits(5)) -> xlenbits = {
   // Deliberately avoids the two-argument `zero_extend(bits, width)` form --
@@ -169,7 +190,30 @@ function clause execute VEDA_BINDINST(mode_bits, rs1, rd) = {
     generation = e.generation,
     owner_hart = mhartid[7..0],
     retired    = e.retired,
+    // DESIGN_02: CARRY OVER, and this one line is the highest-consequence
+    // choice in the increment. A claim is not a repopulate -- taking
+    // ownership of an object says nothing about whether its contents are in
+    // memory. Writing `true` here would let any Bind mark any object
+    // resident, which defeats the entire mechanism in one word; writing
+    // `false` would make the second access to every object fault, breaking
+    // every dereferencing test. Only the carry-over is right.
+    resident   = e.resident,
   };
+
+  // DESIGN_02 -- OBJECT residency gate. Guarded on `e.valid` so the
+  // ordering invariant holds: a never-populated slot is now BOTH invalid
+  // and non-resident, and "never existed" (0x05) must keep winning over
+  // "paged out" (0x0A). Stated positively: a residency fault means the
+  // object EXISTS and is merely absent from memory -- recoverable, and the
+  // handler knows to page it in rather than give up.
+  //
+  // A HARD TRAP FOR ALL BIND MODES, exactly like the region gate above and
+  // for the identical reason: a paged-out object is not a "manipulate"
+  // soft-fail condition. If Bind-NoTrap or Rebind merely cleared Tag here,
+  // the caller would be told "no such object" and the pager would never be
+  // invoked -- a live object would look permanently destroyed.
+  if e.valid & not(e.resident) then veda_trap(rd, VEDA_CAUSE_RESIDENCY_FAULT)
+  else
 
   match mode {
     VEDA_BIND_RESERVED => Illegal_Instruction(),
