@@ -451,6 +451,54 @@ let VEDA_IDC_INDEX : vcapno = Vcapno(15)
 // semantics already established) still redirects PC directly, achieving
 // CHERI's own real "atomic unseal-and-jump" property literally (a true
 // hardware jump, not a two-instruction unseal-then-JALR sequence).
+// ═══════════════════════════════════════════════════════════════════════
+//  R11 (DESIGN_07 Tier H): REVALIDATE THE CODE OBJECT AT A CROSSING.
+//
+//  THE GAP THIS CLOSES, stated exactly. Enumerate every consumer of an
+//  object's Base and ask which of them re-reads the ODT:
+//
+//    veda_check_access      -> OCL.D/OCS.D/OCL.C/OCS.C/Atomic   YES
+//    veda_check_nmc_access  -> NMC_ADD.W/.D                     YES
+//    VEDA_OCINVOKE / VEDA_OCRETURN / VEDA_OCJALR                NO
+//    instruction fetch (PC vs PCC)                              NO
+//
+//  DESIGN_02 Phase 2 added object residency to Bind and to all six data
+//  dereference families. The three crossings are the only Base-consumers
+//  it was never added to -- so a sealed CODE capability survived an
+//  eviction that a DATA capability to the same object did not. Reproduced
+//  on the model: page out an object, then Bind it (correctly refused,
+//  0x0A) versus OCInvoke through a sealed code capability naming it (the
+//  jump was taken). Same eviction, opposite answers.
+//
+//  It is NOT a paging bug -- it predates paging. ODT-Destroy never revoked
+//  the execute view either, which falsifies this file's own stated reason
+//  for CAndPerm existing ("so a later ODT-Destroy still revokes every
+//  view"). Paging merely made the state reachable on a routine path and
+//  placed it directly under the mechanism DESIGN_02 was building.
+//
+//  ONE LOOKUP, TWO VERDICTS, deliberately in this shape so the RTL mirror
+//  reads one ODT entry and derives both terms from it -- the same "the
+//  entry is already read, so the second term is free" property the two
+//  dereference checkers already have.
+//
+//  WHY cs2 IS NOT CHECKED HERE, and this is a decision rather than an
+//  omission: OCInvoke's cs2 becomes the callee's IDC, and every use of it
+//  goes through veda_check_access, which already revalidates. A stale IDC
+//  therefore traps at first use rather than silently succeeding. cs1 is
+//  different in kind precisely because its Base becomes PCC and fetch has
+//  no checker behind it.
+function veda_code_object_check(cap : capability) -> option(bits(5)) = {
+  let e = odt_lookup(cap.Object_ID);
+  // Generation first, matching veda_check_access's own order: a destroyed
+  // or re-incarnated object is a TAG violation, the permanent verdict.
+  if not(e.valid) | e.generation != cap.generation then Some(VEDA_CAUSE_TAG_VIOLATION)
+  // Residency last, for the same reason it is last in both dereference
+  // checkers: RESIDENCY_FAULT is the SERVICEABLE verdict and must be
+  // raised only for a crossing that would otherwise have succeeded.
+  else if not(e.resident) then Some(VEDA_CAUSE_RESIDENCY_FAULT)
+  else None()
+}
+
 function clause execute VEDA_OCINVOKE(rs2, rs1) = {
   let cs1idx = vcapidx_to_vcapno(rs1);
   let cs2idx = vcapidx_to_vcapno(rs2);
@@ -487,7 +535,16 @@ function clause execute VEDA_OCINVOKE(rs2, rs1) = {
   // paged-out domain is a bounded, serviceable event: the handler pages
   // its ODT in and the invoke is retried -- never entered blind.
   else if not(veda_region_rt_resident((cs1.Object_ID)[43 .. 24])) then veda_trap(rs1, VEDA_CAUSE_REGION_FAULT)
-  else {
+  else match veda_code_object_check(cs1) {
+    // R11: placed AFTER the region check and BEFORE the first commit, for
+    // the two reasons R10's own placement records. After the region check
+    // because a non-resident REGION means the object's entry was never
+    // legitimately readable -- answering from it would answer a question
+    // that was never asked. Before any commit because a crossing that
+    // faults must leave nothing behind: not the IDC install, not the PCC
+    // narrowing, not the CRBR load, not the SSC clear, not the jump.
+    Some(cause) => veda_trap(rs1, cause),
+    None() => {
     let unsealed_cs2 : capability = struct {
       Object_ID = cs2.Object_ID,
       Base      = cs2.Base,
@@ -544,6 +601,7 @@ function clause execute VEDA_OCINVOKE(rs2, rs1) = {
     veda_ssc_tag = false;
     let target : xlenbits = veda_to_xlen(zero_extend(cs1.Base) + zero_extend(cs1.Offset));
     jump_to([target with 0 = bitzero])
+    }
   }
 }
 
@@ -618,9 +676,18 @@ function clause execute VEDA_OCJALR(rs2, rs1) = {
   else if not(permBit(cs2.Perms, PERM_UNSEAL)) then veda_trap(rs2, VEDA_CAUSE_SEAL_VIOLATION)
   else if cs2.Offset != zero_extend(cs1.otype) then veda_trap(rs1, VEDA_CAUSE_TYPE_VIOLATION)
   else if not(permBit(cs1.Perms, PERM_EXECUTE)) then veda_trap(rs1, VEDA_CAUSE_PERM_EXECUTE_VIOLATION)
-  else {
-    let target : xlenbits = veda_to_xlen(zero_extend(cs1.Base) + zero_extend(cs1.Offset));
-    jump_to([target with 0 = bitzero])
+  // R11: OCJALR jumps to cs1.Base exactly as the two crossings do, so it
+  // needs the identical revalidation even though it is intra-domain by
+  // design and therefore carries no region check of its own. Intra-domain
+  // is a statement about WHICH table resolves the Object_ID, not about
+  // whether the object still exists -- an object in the current domain can
+  // be destroyed or paged out just as easily as one in another.
+  else match veda_code_object_check(cs1) {
+    Some(cause) => veda_trap(rs1, cause),
+    None() => {
+      let target : xlenbits = veda_to_xlen(zero_extend(cs1.Base) + zero_extend(cs1.Offset));
+      jump_to([target with 0 = bitzero])
+    }
   }
 }
 
@@ -703,7 +770,14 @@ function clause execute VEDA_OCRETURN(rs1) = {
   // one -- the handler pages the caller's ODT back in and the return is
   // retried.
   else if not(veda_region_rt_resident((cs1.Object_ID)[43 .. 24])) then veda_trap(rs1, VEDA_CAUSE_REGION_FAULT)
-  else {
+  // R11: a return is a crossing, and the sentry's object can have been
+  // destroyed or paged out while the callee ran. Without this, a return
+  // into a since-evicted caller lands on a stale Base -- and unlike the
+  // REGION case above, nothing downstream would ever catch it, because
+  // fetch does not revalidate.
+  else match veda_code_object_check(cs1) {
+    Some(cause) => veda_trap(rs1, cause),
+    None() => {
     // Increment 3: PCC is now as wide as the capability, so the
     // compartment bounds are taken directly -- no truncation. This had
     // to land in the SAME increment as the ODT widening: once an object
@@ -723,6 +797,7 @@ function clause execute VEDA_OCRETURN(rs1) = {
     veda_ssc_tag = false;
     let target : xlenbits = veda_to_xlen(zero_extend(cs1.Base) + zero_extend(cs1.Offset));
     jump_to([target with 0 = bitzero])
+    }
   }
 }
 
