@@ -624,3 +624,178 @@ function clause execute VEDA_ODT_POPULATE_FAST(rs2, rs1, rd) = {
 
 mapping clause assembly = VEDA_ODT_POPULATE_FAST(rs2, rs1, rd)
   <-> "veda.odt.populate.fast" ^ spc() ^ reg_name(rd) ^ sep() ^ reg_name(rs1) ^ sep() ^ reg_name(rs2)
+
+// ─────────────────────────────────────────────────────────────────────────
+//  DESIGN_02 Phase 2, increment 2 -- the PAGE-OUT / PAGE-IN pair.
+//
+//  These two implement the cached-Base contract decided in DESIGN_02 ("The
+//  cached-Base fork"): a capability caches Base at Bind time, and paging
+//  necessarily returns an object at a DIFFERENT Base, so the cached copy
+//  must be invalidated. The chosen resolution bumps `generation` on
+//  PAGE-OUT -- holders then take the existing stale-capability trap (0x02),
+//  re-Bind, and receive the new Base -- rather than removing Base caching,
+//  which would have added a DRAM read to every access and damaged both the
+//  cache-less and determinism pillars for a rare event.
+//
+//  Encodings share funct7 0b0000101 and split on funct3 by operand shape,
+//  exactly as ODT-Populate (000) and ODT-Destroy (001) already share
+//  0b0000011: PAGE-IN is three-operand (rs2 = new Base), PAGE-OUT is
+//  two-operand (rs2 hardwired zero). Both points verified unallocated in
+//  this model AND in the RTL's own decode before use.
+//
+//  WHY THIS GRANTS NO NEW AUTHORITY, which is the first thing to check for
+//  a primitive that writes Base: PAGE-OUT followed by PAGE-IN is
+//  observationally equal to one ODT-Populate-Fast (net generation +1,
+//  arbitrary new Base, resident). The pager already holds exactly that
+//  power under the same gate. The two field-level differences both TIGHTEN
+//  it: Populate resets owner_hart to unowned and lets veda_attr
+//  re-permission the object, whereas PAGE-IN preserves owner_hart, Length
+//  and Perms. Paging an object may move it; it may not re-authorize it.
+// ─────────────────────────────────────────────────────────────────────────
+
+union clause instruction = VEDA_ODT_PAGE_OUT : (regidx, regidx)
+
+mapping clause encdec = VEDA_ODT_PAGE_OUT(rs1, rd)
+  <-> 0b0000101 @ 0b00000 @ encdec_reg(rs1) @ 0b001 @ encdec_reg(rd) @ 0b0001011
+  when currentlyEnabled(Ext_Veda) & xlen == 64
+
+// PAGE-OUT: the object's contents leave memory and its frame is freed.
+// Sets resident = false and BUMPS generation, which is what invalidates
+// every outstanding capability. Everything else carries over -- this is
+// not a destroy: the object still EXISTS, which is exactly the distinction
+// increment 1's RESIDENCY_FAULT (0x0A) exists to express.
+//
+// THE SATURATION REFUSAL, and it is the security core of this increment.
+// The whole safety argument for the bump-on-page-out contract is that the
+// bump invalidates outstanding capabilities. `generation` SATURATES at
+// 0xffffff rather than wrapping (the existing rule in Populate and Destroy
+// above). So at saturation the bump would be a silent NO-OP: page-out
+// would clear residency while invalidating nothing, and the subsequent
+// PAGE-IN -- which preserves generation by design -- would restore
+// residency at a NEW Base while every outstanding capability still matched
+// on generation. Those capabilities compute their address from their own
+// CACHED Base, so each would read and write the freed frame, now owned by
+// another object. That is a full use-after-free, and it is the precise
+// attack this pair is built to prevent, reappearing at the boundary.
+//
+// That state is genuinely reachable, not theoretical: a Destroy from
+// 0xfffffe leaves generation 0xffffff with retired STILL false (its
+// retired rule tests the OLD generation), and a following Populate is then
+// permitted and leaves the slot valid, resident, saturated and un-retired.
+// So `retired` does not intercept it.
+//
+// Fix, placed here rather than on PAGE-IN because this is the instruction
+// making the promise: if the invalidation mechanism cannot run, the
+// operation that depends on it must not proceed. FAIL CLOSED. Refusing
+// costs a pager the ability to evict one exhausted object; permitting it
+// costs the temporal-safety guarantee of the whole design.
+function clause execute VEDA_ODT_PAGE_OUT(rs1, rd) = {
+  if not(cur_privilege == Machine | veda_oda_authorized()) then Illegal_Instruction()
+  else {
+    let object_id_gpr64 : bits(64) = zero_extend(X(rs1));
+    let object_id : bits(44) = object_id_gpr64[43..0];
+    let old_entry = odt_lookup(object_id);
+    // Only a live, resident object can be paged out. A non-existent one has
+    // nothing to evict; an already-paged-out one would bump generation a
+    // second time for no benefit, burning the budget and invalidating the
+    // capabilities a pending page-in was about to serve.
+    if not(old_entry.valid) | not(old_entry.resident) then Illegal_Instruction()
+    // The saturation refusal described above.
+    else if old_entry.generation == 0xffffff then Illegal_Instruction()
+    else {
+      odt_write(object_id, struct {
+        valid      = true,          // the object still EXISTS
+        Base       = old_entry.Base, // stale, and unreachable: increment 1's
+                                     // Bind residency gate traps before any
+                                     // mode can mint from it
+        Length     = old_entry.Length,
+        Perms      = old_entry.Perms,
+        // The bump. Guarded above, so this can never be the saturating
+        // no-op -- it always genuinely invalidates.
+        generation = old_entry.generation + 1,
+        owner_hart = old_entry.owner_hart,
+        retired    = old_entry.retired,
+        resident   = false,
+      });
+      X(rd) = zeros();
+      RETIRE_SUCCESS
+    }
+  }
+}
+
+mapping clause assembly = VEDA_ODT_PAGE_OUT(rs1, rd)
+  <-> "veda.odt.page.out" ^ spc() ^ reg_name(rd) ^ sep() ^ reg_name(rs1)
+
+union clause instruction = VEDA_ODT_PAGE_IN : (regidx, regidx, regidx)
+
+mapping clause encdec = VEDA_ODT_PAGE_IN(rs2, rs1, rd)
+  <-> 0b0000101 @ encdec_reg(rs2) @ encdec_reg(rs1) @ 0b000 @ encdec_reg(rd) @ 0b0001011
+  when currentlyEnabled(Ext_Veda) & xlen == 64
+
+// PAGE-IN: the object's contents are back in memory, at a NEW frame.
+// Changes EXACTLY TWO fields -- Base and resident. Length, Perms,
+// owner_hart, retired, generation and valid all carry over, because this
+// is the same object moving, not a repopulate. Writing it in the
+// name-every-field shape (the `claimed_entry` idiom) is deliberate: Sail
+// has no record-update shorthand here, so every field is a decision the
+// compiler forces rather than a default that slips through.
+//
+// THE GATE: valid & NOT resident. Its meaning -- "you may only page IN
+// something a page-OUT produced" -- is true BY CONSTRUCTION, not by
+// convention. Enumerating every odt_write in the model shows why: Populate
+// and Populate-Fast always write resident = true; Destroy writes valid =
+// false together with resident = false; the Bind/Rebind claim carries
+// residency over unchanged AND is preceded by increment 1's residency gate,
+// which traps before the write is reached. So PAGE-OUT is the sole producer
+// of {valid, not resident}, and this instruction therefore cannot be aimed
+// at a live object or a destroyed one.
+//
+// That is what makes a generation-PRESERVING Base write safe. Between
+// page-out and page-in, no capability carrying the current generation can
+// exist: capabilities take their generation only from a Bind, and Bind
+// hard-traps on exactly this state for all three of its modes. The new Base
+// becomes reachable only through a fresh Bind afterwards.
+//
+// HONEST LIMITATION, recorded rather than hidden: the reset test scaffold
+// seeds one object into {valid, not resident} WITHOUT a generation bump
+// (the increment-1 residency fixture, paired with a live capability that
+// still matches its generation). That state is a test artifact, not one a
+// real machine can produce -- but paging THAT object in would revalidate
+// that capability at a new Base. No test may do it, and a seeded
+// non-resident object is not a legitimate page-in input.
+function clause execute VEDA_ODT_PAGE_IN(rs2, rs1, rd) = {
+  if not(cur_privilege == Machine | veda_oda_authorized()) then Illegal_Instruction()
+  else {
+    let object_id_gpr64 : bits(64) = zero_extend(X(rs1));
+    let object_id : bits(44) = object_id_gpr64[43..0];
+    let base_gpr64 : bits(64) = zero_extend(X(rs2));
+    let base : bits(56) = base_gpr64[55..0];
+    let old_entry = odt_lookup(object_id);
+    if not(old_entry.valid) | old_entry.resident then Illegal_Instruction()
+    else {
+      odt_write(object_id, struct {
+        valid      = true,
+        Base       = base,              // CHANGED: the new frame
+        Length     = old_entry.Length,
+        Perms      = old_entry.Perms,
+        // PRESERVED, and this is the whole point of a separate instruction.
+        // Plain Populate would bump here (its rule bumps whenever the old
+        // entry was valid, and a paged-out object is valid), invalidating
+        // every capability on every page-in and making demand paging
+        // useless.
+        generation = old_entry.generation,
+        // PRESERVED. Populate hardcodes unowned, so using it as page-in
+        // would silently drop hart ownership across every paging cycle --
+        // invisible today with one hart, a real hole under multi-hart.
+        owner_hart = old_entry.owner_hart,
+        retired    = old_entry.retired,
+        resident   = true,              // CHANGED: contents are back
+      });
+      X(rd) = zeros();
+      RETIRE_SUCCESS
+    }
+  }
+}
+
+mapping clause assembly = VEDA_ODT_PAGE_IN(rs2, rs1, rd)
+  <-> "veda.odt.page.in" ^ spc() ^ reg_name(rd) ^ sep() ^ reg_name(rs1) ^ sep() ^ reg_name(rs2)

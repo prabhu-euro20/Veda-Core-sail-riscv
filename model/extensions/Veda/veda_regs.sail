@@ -838,6 +838,72 @@ function veda_test_seed_odt() -> unit = {
     retired    = false,
     resident   = false,  // THE fixture: the object exists, but is paged out
   });
+  // Object_ID 611: the PAGE-OUT saturation fixture (DESIGN_02 increment 2).
+  // Seeded ONE step below the 24-bit ceiling, so a single page-out reaches
+  // 0xFFFFFF legitimately and the SECOND one lands exactly on the boundary
+  // where the generation bump would become a silent no-op. Same
+  // near-boundary injection technique the retirement fixture (Object_ID 55)
+  // already uses, and for the same reason: driving 2^24 real increments is
+  // not a test, and lowering the threshold for testing would leave the
+  // shipping boundary arithmetic unexercised.
+  //
+  // Live and RESIDENT, unlike 600 -- this fixture is about the generation
+  // ceiling, not about residency, and it must be page-out-able once.
+  odt_write(to_bits(44, 611), struct {
+    valid      = true,
+    Base       = 0x00000080010600,
+    Length     = 0x0000000100,
+    Perms      = 0x000C, // Load|Store
+    generation = 0xFFFFFE,
+    owner_hart = VEDA_OWNER_UNOWNED,
+    retired    = false,
+    resident   = true,
+  });
+  // Object_ID 614: the GENERATION-PRESERVATION fixture. Seeded TWO steps
+  // below the ceiling, deliberately not one.
+  //
+  // Why two and not one: at 0xFFFFFE a page-in that wrongly BUMPED
+  // generation would saturate to 0xFFFFFF, which is indistinguishable from
+  // correctly preserving 0xFFFFFF. The mutation hides in the saturation. At
+  // 0xFFFFFD the two behaviours separate cleanly and become countable:
+  //   preserving  -- FD->FE, FE->FF, then refused  = TWO page-outs
+  //   bumping     -- FD->FE, page-in bumps to FF   = ONE page-out
+  // The count of successful page-outs before the saturation refusal is the
+  // observable, which matters because `generation` itself is architecturally
+  // unreadable -- there is no CGet for it by design.
+  odt_write(to_bits(44, 614), struct {
+    valid      = true,
+    Base       = 0x00000080010700,
+    Length     = 0x0000000100,
+    Perms      = 0x000C,
+    generation = 0xFFFFFD,
+    owner_hart = VEDA_OWNER_UNOWNED,
+    retired    = false,
+    resident   = true,
+  });
+  // Object_ID 615: the OWNERSHIP-PRESERVATION fixture -- live, resident, and
+  // owned by a DIFFERENT hart (0x63 = 99, the same stand-in the Milestone-12
+  // wrong-owner seed uses, since a single-hart model cannot produce a second
+  // real owner).
+  //
+  // It exists to prove hart ownership SURVIVES a paging cycle. Page-out is
+  // gated on ODA authority, not on ownership, so a pager can legitimately
+  // evict an object it does not own; if page-in then reset owner_hart to
+  // unowned -- which is exactly what using Populate as page-in would do --
+  // any hart could claim the object afterwards. That is object theft by
+  // triggering a page fault, and it is invisible in a one-hart model unless
+  // a fixture like this one makes the ownership observable through Bind's
+  // own 0x06 refusal.
+  odt_write(to_bits(44, 615), struct {
+    valid      = true,
+    Base       = 0x00000080010800,
+    Length     = 0x0000000100,
+    Perms      = 0x000C,
+    generation = zeros(),
+    owner_hart = 0x63,
+    retired    = false,
+    resident   = true,
+  });
   // Phase 1 increment 4: a sixth seeded object whose generation counter is
   // placed ONE below the real 24-bit retirement threshold (0xFFFFFE, i.e.
   // 0xFFFFFF - 1). This is the direct-state-injection answer to "how do you
