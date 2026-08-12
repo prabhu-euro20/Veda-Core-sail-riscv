@@ -473,6 +473,20 @@ function clause execute VEDA_OCINVOKE(rs2, rs1) = {
   else if not(permBit(cs2.Perms, PERM_INVOKE)) then veda_trap(rs2, VEDA_CAUSE_PERM_INVOKE_VIOLATION)
   else if not(permBit(cs1.Perms, PERM_EXECUTE)) then veda_trap(rs1, VEDA_CAUSE_PERM_EXECUTE_VIOLATION)
   else if permBit(cs2.Perms, PERM_EXECUTE) then veda_trap(rs2, VEDA_CAUSE_PERM_EXECUTE_VIOLATION)
+  // R10 (DESIGN_07 Tier G): the domain being ENTERED is the region field
+  // of the code capability's own Object_ID -- unforgeable, because only a
+  // residency-gated Bind ever mints a capability with a given Object_ID.
+  // Validated RT-DIRECT (veda_region_rt_resident), never through the
+  // current-region exemption: the exemption's soundness is exactly what
+  // this check establishes, so consulting it here would let a stale
+  // current region validate its own successor. Placed AFTER all nine
+  // capability checks (a bad capability still reports its real cause
+  // first) and BEFORE the first commit (wC below): a non-resident target
+  // domain faults with REGION_FAULT and commits NOTHING -- not the IDC
+  // install, not the PCC narrowing, not the SSC clear, not the jump. A
+  // paged-out domain is a bounded, serviceable event: the handler pages
+  // its ODT in and the invoke is retried -- never entered blind.
+  else if not(veda_region_rt_resident((cs1.Object_ID)[43 .. 24])) then veda_trap(rs1, VEDA_CAUSE_REGION_FAULT)
   else {
     let unsealed_cs2 : capability = struct {
       Object_ID = cs2.Object_ID,
@@ -498,6 +512,14 @@ function clause execute VEDA_OCINVOKE(rs2, rs1) = {
     // silently mis-bound the compartment, which is a real escape.
     veda_pcc_base = cs1.Base;
     veda_pcc_length = cs1.Length;
+    // R10: the CRBR is loaded HERE, adjacent to the PCC narrowing --
+    // "loaded at domain entry exactly as veda_pcc_base is" (DESIGN_08
+    // Section 4), now real rather than prose. The region was validated
+    // RT-resident above, so veda_crbr_load's in-window assert holds; the
+    // base half of the pair comes from the RT entry, never from the
+    // capability -- the capability supplies only the NAME of the domain,
+    // the always-resident RT supplies its table location.
+    veda_crbr_load((cs1.Object_ID)[43 .. 24]);
     // SSC (Stack-Spill Capability, see veda_types.sail's veda_scr enum):
     // clear (untag) on every successful invoke, unconditionally -- a
     // hardware guarantee, not a software discipline, the identical real
@@ -669,6 +691,18 @@ function clause execute VEDA_OCRETURN(rs1) = {
   else if not(isSealedCap(cs1)) then veda_trap(rs1, VEDA_CAUSE_SEAL_VIOLATION)
   else if cs1.otype != VEDA_OTYPE_SENTRY then veda_trap(rs1, VEDA_CAUSE_SEAL_VIOLATION)
   else if not(permBit(cs1.Perms, PERM_EXECUTE)) then veda_trap(rs1, VEDA_CAUSE_PERM_EXECUTE_VIOLATION)
+  // R10: the domain being RETURNED TO is the region field of the sentry's
+  // own Object_ID -- the caller's code object, named unforgeably at
+  // csealentry-mint time. Same RT-direct validation, same
+  // nothing-committed-on-fault placement as VEDA_OCINVOKE above. This
+  // check IS the R10 escape closure: without it, a caller returning from
+  // a callee kept the callee's region as "current" (fault-exempt by
+  // construction), inheriting unchecked RT-free reach into the callee's
+  // entire object namespace. A return into a since-paged-out caller
+  // domain is the same bounded, serviceable REGION_FAULT as a bind into
+  // one -- the handler pages the caller's ODT back in and the return is
+  // retried.
+  else if not(veda_region_rt_resident((cs1.Object_ID)[43 .. 24])) then veda_trap(rs1, VEDA_CAUSE_REGION_FAULT)
   else {
     // Increment 3: PCC is now as wide as the capability, so the
     // compartment bounds are taken directly -- no truncation. This had
@@ -677,6 +711,10 @@ function clause execute VEDA_OCRETURN(rs1) = {
     // silently mis-bound the compartment, which is a real escape.
     veda_pcc_base = cs1.Base;
     veda_pcc_length = cs1.Length;
+    // R10: reload the CRBR for the domain being re-entered, exactly as
+    // OCInvoke does on the way in -- return is a real compartment-boundary
+    // crossing (the SSC clear below already records that lesson).
+    veda_crbr_load((cs1.Object_ID)[43 .. 24]);
     // SSC: clear on every successful return too, the identical reason and
     // identical mechanism as VEDA_OCINVOKE above -- OCRETURN is a real,
     // general compartment-boundary crossing (not only used inside the

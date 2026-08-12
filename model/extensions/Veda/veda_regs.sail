@@ -119,11 +119,24 @@ register veda_mepcc_length : bits(40)
 // resets to unbounded so the trap handler itself runs in a trusted,
 // unconstrained context -- real CHERI's own "Exception Code Capability"
 // requirement (CHERI ISA spec §3.4.7).
+// R10: the CRBR halves of the trap/xret discipline. Forward-declared here
+// because their bodies need the Region Table and CRBR registers, which are
+// declared further down this file (Sail requires declaration before use);
+// the bodies live directly after veda_crbr_load below.
+val veda_crbr_save_and_reset : unit -> unit
+val veda_crbr_restore_on_xret : unit -> unit
+
 function veda_pcc_save_and_reset() -> unit = {
   veda_mepcc_base = veda_pcc_base;
   veda_mepcc_length = veda_pcc_length;
   veda_pcc_base = zeros();
   veda_pcc_length = VEDA_PCC_UNBOUNDED;
+  // R10: the CRBR half of the same trap discipline, folded into this one
+  // function so every existing save site (veda_trap, the fetch/data check
+  // errors, the CSR write gates, handle_trap_extension) inherits it at
+  // once -- the Milestone-21 lesson was precisely that per-site additions
+  // miss paths.
+  veda_crbr_save_and_reset();
 }
 
 // Automatic restore-on-mret/sret counterpart, matching real CHERI's own
@@ -168,7 +181,15 @@ function veda_pcc_restore_on_xret() -> unit = {
     veda_pcc_length = veda_mepcc_length;
     veda_mepcc_base = zeros();
     veda_mepcc_length = VEDA_PCC_UNBOUNDED;
-  }
+  };
+  // R10: the CRBR restore rides the same xret, but under its OWN sentinel
+  // guard (VEDA_REGION_NONE), deliberately NOT inside the mepcc guard
+  // above. The two captures have different conditions (mepcc: PCC was
+  // bounded; CRBR: region was non-root), so coupling the restores would
+  // strand a saved region whenever a trap was taken from a non-root domain
+  // whose PCC happened to be unbounded -- the two disciplines must stay
+  // independent to stay individually self-consuming.
+  veda_crbr_restore_on_xret();
 }
 
 // Real, empirically-confirmed privilege-escalation gap, found while
@@ -271,6 +292,19 @@ mapping clause csr_name_map = 0x7C2 <-> "veda_mepcc_base"
 mapping clause csr_name_map = 0x7C3 <-> "veda_mepcc_length"
 mapping clause csr_name_map = 0x7C4 <-> "veda_attr"
 mapping clause csr_name_map = 0x7C5 <-> "veda_mode"
+// R10: read-only observability for the CRBR and its saved shadow. The
+// whole reason R10 was a SILENT escape is that nothing ever observed the
+// current region -- so exposing it (read-only) is the honest fix for the
+// observability gap, and it is what lets a test assert the trap-save /
+// mret-restore cycle directly instead of only inferring it. STRICTLY
+// read-only, enforced at the accessibility gate below (writes are
+// Illegal_Instruction, no write_CSR clause exists), so this adds NO new
+// write surface -- unlike a writable CRBR CSR, which would be a
+// Milestone-19/20-class self-escape (a live compartment CSRRW-ing its own
+// ODT base re-points its whole namespace). Read-only matches this file's
+// established "capability metadata is always inspectable" principle.
+mapping clause csr_name_map = 0x7C6 <-> "veda_current_region"
+mapping clause csr_name_map = 0x7C7 <-> "veda_saved_region"
 
 function clause is_CSR_accessible(0x7C0, _, _) = currentlyEnabled(Ext_Veda)
 function clause is_CSR_accessible(0x7C1, _, _) = currentlyEnabled(Ext_Veda)
@@ -278,6 +312,11 @@ function clause is_CSR_accessible(0x7C2, _, _) = currentlyEnabled(Ext_Veda)
 function clause is_CSR_accessible(0x7C3, _, _) = currentlyEnabled(Ext_Veda)
 function clause is_CSR_accessible(0x7C4, _, _) = currentlyEnabled(Ext_Veda)
 function clause is_CSR_accessible(0x7C5, _, _) = currentlyEnabled(Ext_Veda)
+// R10: read-only -- accessible ONLY for reads. A write attempt is
+// inaccessible and traps Illegal_Instruction before any dispatch, which
+// is why no write_CSR(0x7C6/0x7C7) clause exists or is needed.
+function clause is_CSR_accessible(0x7C6, _, access_type) = currentlyEnabled(Ext_Veda) & (access_type == CSRRead)
+function clause is_CSR_accessible(0x7C7, _, access_type) = currentlyEnabled(Ext_Veda) & (access_type == CSRRead)
 
 function clause read_CSR(0x7C0) = veda_to_xlen(zero_extend(veda_pcc_base))
 function clause read_CSR(0x7C1) = veda_to_xlen(zero_extend(veda_pcc_length))
@@ -285,6 +324,10 @@ function clause read_CSR(0x7C2) = veda_to_xlen(zero_extend(veda_mepcc_base))
 function clause read_CSR(0x7C3) = veda_to_xlen(zero_extend(veda_mepcc_length))
 function clause read_CSR(0x7C4) = veda_to_xlen(veda_attr)
 function clause read_CSR(0x7C5) = zero_extend(veda_mode)
+// read_CSR(0x7C6)/(0x7C7) are declared after the CRBR register
+// declarations below -- Sail requires the register bound before a clause
+// that reads it (the pcc CSRs above sit after veda_pcc_base for the same
+// reason).
 
 // Milestone 20 (real, empirically-confirmed vulnerability, not
 // theorized): before this pass, all four of these writes were
@@ -469,8 +512,7 @@ let VEDA_LOCAL_MODELED  = 1048576  // 2^20 modeled objects per region; 8 x this 
 // The Region Table: flat, always-resident, one entry per modeled domain.
 register veda_region_table : vector(8, region_entry) = vector_init(empty_region_entry)
 
-// The Current-Region Base Register (CRBR, DESIGN_08 Section 4). Loaded at
-// domain entry (OCInvoke) exactly as veda_pcc_base is -- a single
+// The Current-Region Base Register (CRBR, DESIGN_08 Section 4). A single
 // architectural register, NOT a cache or TLB (no tags, no eviction, no
 // fill-on-miss, no access history). It lets a bind to an object in the
 // CURRENT domain skip the RT read entirely: intra-domain bind = one ODT read
@@ -478,8 +520,121 @@ register veda_region_table : vector(8, region_entry) = vector_init(empty_region_
 // cross-domain bind pays the extra RT read. veda_current_region defaults to
 // region 0, so every pre-DESIGN_08 test (all region-0 objects) stays on the
 // one-read fast path and is byte-for-byte unaffected.
+//
+// R10 (DESIGN_07 Tier G): the CRBR is now genuinely LOADED at the two
+// domain crossings (VEDA_OCINVOKE / VEDA_OCRETURN, veda_cap_insts.sail),
+// under one rule with two clauses:
+//
+//   The CRBR is loaded ONLY from the Object_ID[43:24] of the code
+//   capability being entered or returned to, and EVERY load is validated
+//   through the Region Table -- never through the current-region
+//   fast-path exemption below.
+//
+// The first clause makes the source unforgeable (a capability's Object_ID
+// cannot be manufactured; only Bind mints one, and Bind is residency-
+// gated). The second clause is what makes veda_region_is_resident's
+// exemption sound BY CONSTRUCTION rather than by convention: the CRBR can
+// only ever come to name a region the RT said was resident at load time.
+// A load whose region is not RT-resident raises VEDA_CAUSE_REGION_FAULT
+// and commits nothing.
 register veda_current_region   : bits(20) = zeros()
 register veda_current_odt_base : bits(56) = zeros()
+
+// R10: the saved-CRBR pair for the trap/mret cycle, the structural twin of
+// veda_mepcc_base/_length above. Region 0 is a LEGITIMATE region (the root
+// domain every pre-DESIGN_08 test runs in), so "saved == 0" cannot mean
+// "nothing saved" the way VEDA_PCC_UNBOUNDED does for mepcc -- the empty
+// sentinel is instead an OUT-OF-WINDOW region value: 0xFFFFF is >=
+// VEDA_REGION_MODELED, can never be current (every load is RT-validated,
+// and out-of-window regions are never RT-resident), and so can never be
+// confused with a real saved domain.
+let VEDA_REGION_NONE : bits(20) = 0xFFFFF
+register veda_saved_region      : bits(20) = 0xFFFFF
+register veda_saved_region_base : bits(56) = zeros()
+
+// R10: the RT-direct residency check used for CRBR LOADS. Deliberately a
+// separate function from veda_region_is_resident below, and deliberately
+// WITHOUT its current-region exemption: the exemption's soundness is
+// exactly what a validated load establishes, so the load itself consulting
+// the exemption would be circular -- a stale current region would validate
+// its own successor. Out-of-window regions are not modeled and therefore
+// not resident; in-window regions are resident iff the RT says so on BOTH
+// bits (rt_valid gains its first-ever consumer here: a slot that has never
+// been configured must fail closed even if its resident bit were somehow
+// set).
+function veda_region_rt_resident(region : bits(20)) -> bool = {
+  let ru = unsigned(region);
+  if ru >= VEDA_REGION_MODELED then false
+  else veda_region_table[ru].rt_valid & veda_region_table[ru].region_resident
+}
+
+// R10: the validated CRBR load. Caller must have already checked
+// veda_region_rt_resident (the two crossings trap with REGION_FAULT before
+// calling this); the assert re-establishes the in-bounds fact across that
+// caller boundary, the same discipline odt_lookup already uses. The PAIR
+// is loaded together from the same RT entry -- region and base must never
+// be written separately, or veda_odt_base_of would serve a mismatched base
+// for the "current" region: silent cross-region ODT aliasing, strictly
+// worse than the escape this mechanism closes.
+function veda_crbr_load(region : bits(20)) -> unit = {
+  let ru = unsigned(region);
+  assert(ru >= 0 & ru < VEDA_REGION_MODELED);
+  veda_current_region   = region;
+  veda_current_odt_base = veda_region_table[ru].region_odt_base;
+}
+
+// R10: trap-entry half (body for the forward declaration next to
+// veda_pcc_save_and_reset above, which calls this on every save site).
+// Capture is conditional on a NON-ROOT domain being live: region 0 needs
+// no save, because the reset target below IS region 0, so a restore-to-0
+// is the identity. The guard is also what protects the saved value from a
+// nested trap: the handler itself runs in region 0, so a second trap taken
+// inside it captures nothing and cannot clobber the first trap's save --
+// structurally the same protection the PCC side gets from its UNBOUNDED
+// sentinel. The reset is UNCONDITIONAL, mirroring the PCC reset: the
+// handler always runs in the root domain, never in the faulting
+// compartment's -- otherwise a handler could page out the very region its
+// own CRBR still names (the second escape path R10 records).
+function veda_crbr_save_and_reset() -> unit = {
+  if veda_current_region != zeros() then {
+    veda_saved_region      = veda_current_region;
+    veda_saved_region_base = veda_current_odt_base;
+  };
+  veda_current_region   = zeros();
+  veda_current_odt_base = veda_region_table[0].region_odt_base;
+}
+
+// R10: xret half. Self-consuming exactly as the mepcc restore is: a saved
+// domain is never applied to more than one mret/sret. The restore is
+// INFALLIBLE by design -- it re-installs the saved pair verbatim, with no
+// RT re-validation -- and that is sound TODAY for a checked reason, not an
+// assumed one: the Region Table is immutable after reset (no RT-write
+// instruction exists), so a pair that was RT-validated at its original
+// load is still valid at restore. It is also FORCED: the mret path cannot
+// raise a further trap in this model (veda_trap's result would be
+// discarded in this unit context, and handle_exception from inside the
+// hook would clobber mepc and then be overwritten by mret's own
+// set_next_pc -- a livelock, verified by reading the dispatch in
+// postlude/step.sail and sys/sys_control.sail before deciding this).
+// HARD OBLIGATION recorded for the future RT-write instruction
+// (DESIGN_07 R10, DESIGN_08 Section 9): it must refuse to clear residency
+// on the CURRENT region and on any SAVED region, or this restore stops
+// being sound the day that instruction lands.
+function veda_crbr_restore_on_xret() -> unit = {
+  if veda_saved_region != VEDA_REGION_NONE then {
+    veda_current_region    = veda_saved_region;
+    veda_current_odt_base  = veda_saved_region_base;
+    veda_saved_region      = VEDA_REGION_NONE;
+    veda_saved_region_base = zeros();
+  }
+}
+
+// R10: the read-only CRBR observability CSR bodies, placed here (not up
+// with the other read_CSR clauses) because Sail requires
+// veda_current_region/veda_saved_region declared before a clause reads
+// them. Accessibility and the name map are declared up with the others.
+function clause read_CSR(0x7C6) = zero_extend(veda_current_region)
+function clause read_CSR(0x7C7) = zero_extend(veda_saved_region)
 
 // Resolve a region's ODT base: the CRBR for the current region (the fast
 // path, no RT read), the RT otherwise. Out-of-modeled-window regions get a
@@ -566,6 +721,15 @@ function veda_test_seed_odt() -> unit = {
   veda_region_table[0] = struct { rt_valid = true,  region_odt_base = to_bits(56, 0),       region_resident = true,  region_backing = zeros(), region_generation = zeros() };
   veda_region_table[1] = struct { rt_valid = true,  region_odt_base = to_bits(56, 1048576),  region_resident = true,  region_backing = zeros(), region_generation = zeros() };
   veda_region_table[2] = struct { rt_valid = true,  region_odt_base = to_bits(56, 2097152),  region_resident = false, region_backing = zeros(), region_generation = zeros() };
+  // R10: region 3 is the rt_valid GATE fixture -- deliberately the
+  // contradictory state {rt_valid = false, region_resident = true}: an
+  // UNCONFIGURED slot whose resident bit happens to be set (garbage, or a
+  // half-torn write). veda_region_rt_resident must fail CLOSED on it (check
+  // rt_valid FIRST), so a CRBR load into region 3 REGION_FAULTs even though
+  // its resident bit is true. rt_valid gains its first-ever consumer in the
+  // R10 fix; without a slot in this exact state, dropping the rt_valid
+  // conjunct would be an unobserved mutation.
+  veda_region_table[3] = struct { rt_valid = false, region_odt_base = to_bits(56, 3145728),  region_resident = true,  region_backing = zeros(), region_generation = zeros() };
   veda_current_region   = zeros();       // region 0 is the running domain
   veda_current_odt_base = to_bits(56, 0); // its ODT base
   // 0x0001 was a valid 16-bit literal before this pass's widening; now
@@ -690,5 +854,77 @@ function veda_test_seed_odt() -> unit = {
     generation = zeros(),
     owner_hart = VEDA_OWNER_UNOWNED,
     retired    = false,
-  })
+  });
+  // ── R10 test scaffold: three CRF seeds naming region 2 ──────────────
+  // A region-2 capability CANNOT be obtained at runtime, and that is the
+  // mechanism working, not a test inconvenience: Bind is residency-gated,
+  // so a paged-out domain's objects cannot be re-bound -- but capabilities
+  // MINTED WHILE THE REGION WAS RESIDENT can still be sitting in registers
+  // when it pages out. Residency is dynamic in the real design; these
+  // seeds model exactly that legal state (the same direct state-injection
+  // technique the wrong-owner and near-retirement seeds above already
+  // use, because a single-hart test environment has no other way to reach
+  // it). They exist so the R10 negative tests can prove that OCInvoke and
+  // OCReturn REFUSE such a capability with an explicit REGION_FAULT
+  // rather than entering a domain whose table is paged out.
+  //
+  // c10 = sealed region-2 CODE (Perms Execute|Invoke = 0x0402), c11 =
+  // sealed region-2 DATA (Invoke only = 0x0400, deliberately non-exec),
+  // matching otype 0x0042 -- together they pass all nine of OCInvoke's
+  // capability checks, so the FIRST failure is the region gate, which is
+  // precisely what the test must isolate. c13 = region-2 SENTRY (otype
+  // 0xFFFE, Execute) for the OCReturn side. Object_IDs (2<<24)|8, |9, |10
+  // -- distinct from seed (B)'s |7; none needs an ODT entry, because the
+  // gate fires before any lookup (and neither crossing reads the ODT at
+  // all). No existing test reads c10/c11/c13 before writing it
+  // (grep-verified before choosing, and re-proven by the full-corpus
+  // regression run).
+  wC(Vcapno(10), struct {
+    Object_ID  = to_bits(44, 33554440), // (2 << 24) | 8
+    Base       = 0x00000080030000,
+    Length     = 0x0000000040,
+    Offset     = zeros(),
+    Perms      = 0x0402, // Execute | Invoke
+    otype      = 0x0042,
+    generation = zeros(),
+    flags      = zeros(),
+  });
+  wCTag(Vcapno(10), true);
+  wC(Vcapno(11), struct {
+    Object_ID  = to_bits(44, 33554441), // (2 << 24) | 9
+    Base       = 0x00000080030000,
+    Length     = 0x0000000040,
+    Offset     = zeros(),
+    Perms      = 0x0400, // Invoke only, non-executable
+    otype      = 0x0042,
+    generation = zeros(),
+    flags      = zeros(),
+  });
+  wCTag(Vcapno(11), true);
+  wC(Vcapno(13), struct {
+    Object_ID  = to_bits(44, 33554442), // (2 << 24) | 10
+    Base       = 0x00000080030000,
+    Length     = 0x0000000040,
+    Offset     = zeros(),
+    Perms      = 0x0002, // Execute
+    otype      = VEDA_OTYPE_SENTRY,
+    generation = zeros(),
+    flags      = zeros(),
+  });
+  wCTag(Vcapno(13), true);
+  // c14 = region-3 SENTRY, the rt_valid-gate fixture (RT[3] is
+  // {valid=false, resident=true}). OCReturn through it must REGION_FAULT
+  // BECAUSE rt_valid is false, even though resident is true -- the sole
+  // test that pins the fail-closed rt_valid conjunct. Object_ID (3<<24)|1.
+  wC(Vcapno(14), struct {
+    Object_ID  = to_bits(44, 50331649), // (3 << 24) | 1
+    Base       = 0x00000080040000,
+    Length     = 0x0000000040,
+    Offset     = zeros(),
+    Perms      = 0x0002, // Execute
+    otype      = VEDA_OTYPE_SENTRY,
+    generation = zeros(),
+    flags      = zeros(),
+  });
+  wCTag(Vcapno(14), true)
 }

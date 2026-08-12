@@ -38,6 +38,11 @@ function ext_reset() -> unit = {
   veda_pcc_length = VEDA_PCC_UNBOUNDED;
   veda_mepcc_base = zeros();
   veda_mepcc_length = VEDA_PCC_UNBOUNDED;
+  // R10: the saved-CRBR pair resets to its own "nothing saved" sentinel,
+  // the exact analogue of the mepcc pair above (region 0 is a legitimate
+  // region, so the empty sentinel must be an out-of-window value instead).
+  veda_saved_region = VEDA_REGION_NONE;
+  veda_saved_region_base = zeros();
   // Milestone 18: explicit zero, matching this function's own existing
   // explicit-reset style above (Sail's own default is already zero).
   veda_attr = zeros();
@@ -229,5 +234,16 @@ function ext_handle_data_check_error(err : ext_data_addr_error) -> unit = {
 // active here (no CLINT/timer wiring exists in this project's own RTL or
 // Sail work, per this project's own prior research).
 function handle_trap_extension(_p : Privilege, _pc : xlenbits, _ext : option(unit)) -> unit = {
-  if veda_pcc_length != VEDA_PCC_UNBOUNDED then veda_pcc_save_and_reset()
+  // R10: the guard gains a second disjunct. "In a compartment" and "in a
+  // non-root domain" are INDEPENDENT conditions -- OCInvoke into a
+  // max-length (unbounded) code object whose Object_ID names a non-zero
+  // region leaves PCC unbounded while the CRBR names that region. A trap
+  // taken from that state must still save/reset the CRBR, or the handler
+  // would run in the faulting domain (the R10 second escape path). Inside
+  // the body, each half stays individually guarded: mepcc's capture of an
+  // UNBOUNDED length is its own "nothing saved" sentinel (harmless), and
+  // the CRBR capture is conditional on region != 0, so neither half
+  // pollutes the other's saved state.
+  if veda_pcc_length != VEDA_PCC_UNBOUNDED | veda_current_region != zeros()
+  then veda_pcc_save_and_reset()
 }
