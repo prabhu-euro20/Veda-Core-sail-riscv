@@ -272,6 +272,29 @@ function veda_check_nmc_access(capidx : vcapno, width : int) -> result(physaddr,
   else if not(entry.valid) | entry.generation != cap.generation then Err(veda_trap(vcapno_to_vcapidx(capidx), VEDA_CAUSE_TAG_VIOLATION))
   else if isSealedCap(cap) then Err(veda_trap(vcapno_to_vcapidx(capidx), VEDA_CAUSE_SEAL_VIOLATION))
   else if not(permBit(cap.Perms, PERM_NMC_COMPUTE)) then Err(veda_trap(vcapno_to_vcapidx(capidx), VEDA_CAUSE_PERM_NMC_COMPUTE_VIOLATION))
+  // NMC_ADD IS A LOAD AND A STORE, and until now it asked for neither.
+  //
+  // The clause below this one calls read_ram, returns the loaded value in rd,
+  // and calls write_ram. Permit_NMC_Compute was the ONLY permission gate, so a
+  // capability with Permit_Store deliberately stripped could still write
+  // through NMC_ADD -- and the seeded fixture's Perms 0x100C carries
+  // Load|Store|NMC_Compute together, so an attenuated capability keeps bit 12
+  // and the write lands. That makes every store-side attenuation in the
+  // architecture advisory, including the one DESIGN_02's copy-on-write is
+  // specified to be built on.
+  //
+  // Veda-Atomic already settled this for the identical instruction shape:
+  // veda_atomic_insts.sail:34 says in as many words "Permission: reuses
+  // Permit_Load + Permit_Store", and its checker call passes (true, true).
+  // Two read-modify-write families in one model answered the same question
+  // two different ways; this is the one that was never asked.
+  //
+  // Permit_NMC_Compute stays, as an ADDITIONAL gate ("this object may be
+  // computed on near memory"), not as a substitute. The principle: a value
+  // reaching software from memory is a load and a value reaching memory is a
+  // store, whatever single instruction performs them.
+  else if not(permBit(cap.Perms, PERM_LOAD)) then Err(veda_trap(vcapno_to_vcapidx(capidx), VEDA_CAUSE_PERM_LOAD_VIOLATION))
+  else if not(permBit(cap.Perms, PERM_STORE)) then Err(veda_trap(vcapno_to_vcapidx(capidx), VEDA_CAUSE_PERM_STORE_VIOLATION))
   else if unsigned(offset) + width > unsigned(cap.Length) then Err(veda_trap(vcapno_to_vcapidx(capidx), VEDA_CAUSE_BOUNDS_VIOLATION))
   // DESIGN_02 -- OBJECT residency, checked HERE and not only at Bind. This
   // term closes a real hole, and it is free: `entry` is already read above,
