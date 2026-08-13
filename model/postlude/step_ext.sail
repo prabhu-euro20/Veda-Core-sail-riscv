@@ -38,6 +38,8 @@ function ext_reset() -> unit = {
   veda_pcc_length = VEDA_PCC_UNBOUNDED;
   veda_mepcc_base = zeros();
   veda_mepcc_length = VEDA_PCC_UNBOUNDED;
+  veda_trap_depth = zeros();
+  veda_trap_poison = false;
   // R10: the saved-CRBR pair resets to its own "nothing saved" sentinel,
   // the exact analogue of the mepcc pair above (region 0 is a legitimate
   // region, so the empty sentinel must be an out-of-window value instead).
@@ -91,7 +93,9 @@ function ext_fetch_check_pc(_start_pc : xlenbits, pc : xlenbits) -> option(ext_f
 // inline rather than through `veda_trap()`'s own 4-bit-`vcapidx`-typed
 // interface, since this was never a real capability-register index.
 function ext_handle_fetch_check_error(_err : ext_fetch_addr_error) -> unit = {
-  veda_pcc_save_and_reset();
+  // R12: inline save removed -- the chokepoint now performs it exactly
+  // once per trap. handle_exception below reaches trap_handler, which
+  // calls handle_trap_extension unconditionally.
   handle_exception(zero_extend(0b10000 @ 0b00001), E_Extension(()))
 }
 
@@ -171,7 +175,9 @@ function ext_data_get_addr(base : regidx, offset : xlenbits, _access : MemoryAcc
 // Section 3 already had 0x07 genuinely reserved for exactly this class of
 // distinct violation kind.
 function ext_handle_data_check_error(err : ext_data_addr_error) -> unit = {
-  veda_pcc_save_and_reset();
+  // R12: inline save removed -- the chokepoint now performs it exactly
+  // once per trap. handle_exception below reaches trap_handler, which
+  // calls handle_trap_extension unconditionally.
   handle_exception(zero_extend(err.cap_idx @ err.cause), E_Extension(()))
 }
 
@@ -244,6 +250,24 @@ function handle_trap_extension(_p : Privilege, _pc : xlenbits, _ext : option(uni
   // UNBOUNDED length is its own "nothing saved" sentinel (harmless), and
   // the CRBR capture is conditional on region != 0, so neither half
   // pollutes the other's saved state.
-  if veda_pcc_length != VEDA_PCC_UNBOUNDED | veda_current_region != zeros()
-  then veda_pcc_save_and_reset()
+  // R12: the guard is REMOVED and the call is unconditional.
+  //
+  // It was a LIVE-STATE test ("is a compartment active, so is there
+  // context worth saving?"), which is a sound question -- but a counter
+  // must count EVERY trap or it is not a trap depth. Under the old guard a
+  // nested trap taken from an unbounded handler was invisible: the live
+  // state had already been reset by the outer trap, so the guard read
+  // false and the nesting was never observed at all. That is precisely the
+  // case the mechanism exists to catch.
+  //
+  // The live-state question has not been discarded, only moved inside
+  // veda_pcc_save_and_reset, where it now decides whether the level being
+  // entered carries real context (and therefore poisons) rather than
+  // whether the trap is counted.
+  //
+  // Safe to make unconditional only because the eight inline save sites
+  // were removed in this same change. sys_control calls this exactly once
+  // per delivered trap, in both the Machine and Supervisor arms, before
+  // prepare_trap_vector -- so depth tracks traps one-for-one.
+  veda_pcc_save_and_reset()
 }

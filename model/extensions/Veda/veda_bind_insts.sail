@@ -125,7 +125,17 @@ function veda_trap(cap_idx : vcapidx, cause : bits(5)) -> ExecutionResult = {
   // trap handler must run in a trusted, unconstrained context, not be
   // blocked by whatever OCInvoke-narrowed bounds happened to be active
   // when the violation occurred.
-  veda_pcc_save_and_reset();
+  // R12: the inline save is REMOVED. It is now performed once, at the
+  // single trap chokepoint (handle_trap_extension), which sys_control
+  // calls unconditionally in both its Machine and Supervisor arms before
+  // prepare_trap_vector -- i.e. before the handler's first fetch, which is
+  // the ordering Milestone 21 depends on. The requirement quoted above is
+  // therefore still met, one level down.
+  //
+  // THIS LINE WAS THE R12 WRITE VECTOR. The confirmed proof-of-concept
+  // takes its nested trap through an ordinary capability violation, which
+  // arrives here -- and the unconditional capture then copied the
+  // already-reset PCC over the outer compartment's saved bounds.
   let Vcapidx(idx) = cap_idx;
   trap(make_sync_exception(E_Extension(()), veda_xtval(idx, cause)))
 }

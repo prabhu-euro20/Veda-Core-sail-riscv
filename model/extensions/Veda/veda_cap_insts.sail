@@ -795,6 +795,12 @@ function clause execute VEDA_OCRETURN(rs1) = {
     // scheduler's own switcher pattern), so the same hardware guarantee
     // must hold unconditionally here as well, not just on the call side.
     veda_ssc_tag = false;
+    // R12: a return through the switcher may be leaving a trap handler,
+    // and it is the architecture's second exit from one. PCC has just been
+    // installed from cs1, so any saved frame is superseded -- abandon it
+    // rather than leave it outstanding, which would strand the depth and
+    // eventually poison every later return.
+    veda_trap_frame_abandon();
     let target : xlenbits = veda_to_xlen(zero_extend(cs1.Base) + zero_extend(cs1.Offset));
     jump_to([target with 0 = bitzero])
     }

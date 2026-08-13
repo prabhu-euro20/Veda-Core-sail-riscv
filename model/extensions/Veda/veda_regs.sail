@@ -110,6 +110,47 @@ register veda_pcc_length : bits(40)
 register veda_mepcc_base : bits(56)
 register veda_mepcc_length : bits(40)
 
+// ═══════════════════════════════════════════════════════════════════════
+//  R12 (DESIGN_07 Tier H) -- OUT-OF-BAND TRAP NESTING STATE.
+//
+//  WHY AN OUT-OF-BAND BIT AT ALL. VEDA_PCC_UNBOUNDED was being made to
+//  mean two different things: "this compartment has no bounds" (a real
+//  runtime state) and "nothing was saved" (what the restore guard read it
+//  as). Those are different facts, and an object may legitimately have
+//  Length == VEDA_PCC_UNBOUNDED -- odt_entry.Length is bits(40) and
+//  Populate-Fast writes it unrestricted, so the collision is reachable,
+//  not theoretical. Conflating them IS R12.
+//
+//  This follows CHERI, which faced the same choice and made the opposite
+//  one: MEPCC there is a Special Capability Register and therefore tagged,
+//  and the specification states both "NULL Does Not Have the Tag Bit Set"
+//  and "The length of NULL is MAXINT". CHERI's null carries the same
+//  maximal length our sentinel uses and is distinguished OUT OF BAND.
+//
+//  WHY A COUNTER AND NOT JUST A VALIDITY BIT. A bit answers "is a save
+//  outstanding" but not "is this the xret that owns it". With one slot and
+//  a bare validity bit, a nested trap leaves the outer save intact and the
+//  INNER xret then consumes it -- installing compartment bounds into the
+//  still-running handler. Same escape, one level up. Only a depth notion
+//  distinguishes the outermost xret from an inner one.
+//
+//  WHY THIS IS ONLY NOW IMPLEMENTABLE. A counter is meaningless unless it
+//  increments exactly once per trap. Until R12 there were NINE callers of
+//  veda_pcc_save_and_reset, five of them CSR-escape gates that save inline
+//  and then raise a real exception which reaches the chokepoint as well --
+//  so one logical trap could reach the save twice. Those eight inline
+//  calls are removed in this same change; the chokepoint is now the sole
+//  caller, and sys_control invokes it unconditionally in both arms. THAT
+//  is what makes "once per trap" true, and the counter honest.
+//
+//  NOT SOFTWARE-WRITABLE, deliberately. veda_mepcc_base/_length are
+//  writable via CSR 0x7C2/0x7C3 while PCC is unbounded, so a handler can
+//  already forge the saved VALUE. It must not additionally be able to
+//  forge the OCCUPANCY, or the mechanism is defeated by the software it
+//  exists to constrain. There is no write_CSR clause for these.
+register veda_trap_depth : bits(8)
+register veda_trap_poison : bool
+
 // Milestone 14: shared by both real hard-trap paths that narrow PCC
 // away from a live compartment -- `veda_trap()` (every ordinary
 // Veda-Core "use"-family violation) and the new PCC-bounds-violation
@@ -123,12 +164,43 @@ register veda_mepcc_length : bits(40)
 // because their bodies need the Region Table and CRBR registers, which are
 // declared further down this file (Sail requires declaration before use);
 // the bodies live directly after veda_crbr_load below.
+// R12: forward-declared for the same reason the CRBR pair above is -- it
+// reads veda_current_region, which is declared further down this file, and
+// Sail requires declaration before use. The type checker caught this
+// directly; it is the kind of ordering error TL-Verilog accepts silently,
+// which is why the Sail layer is written first.
+val veda_trap_level_has_context : unit -> bool
+val veda_trap_frame_abandon : unit -> unit
 val veda_crbr_save_and_reset : unit -> unit
 val veda_crbr_restore_on_xret : unit -> unit
 
 function veda_pcc_save_and_reset() -> unit = {
-  veda_mepcc_base = veda_pcc_base;
-  veda_mepcc_length = veda_pcc_length;
+  // R12. Capture ONLY on the outermost trap. At depth > 0 an outer save is
+  // already held and must not be overwritten -- that overwrite was the
+  // confirmed defect.
+  if veda_trap_depth == zeros() then {
+    veda_mepcc_base = veda_pcc_base;
+    veda_mepcc_length = veda_pcc_length;
+  } else {
+    // A nested trap. Ordinarily harmless: the handler runs with PCC
+    // already reset, so the level being entered has no context worth
+    // keeping and can be reconstructed on the way out.
+    //
+    // The exception is the case that makes a bare guard insufficient. A
+    // handler running unbounded may legitimately narrow itself -- by
+    // OCInvoke, or by writing 0x7C0/0x7C1, which the CSR gates permit
+    // precisely while unbounded -- and then fault. That level's context is
+    // real, one slot cannot hold it, and a counter cannot reconstruct it.
+    // Record that the chain is unreconstructible and fail closed on the
+    // way out rather than guessing.
+    if veda_trap_level_has_context() then veda_trap_poison = true
+  };
+  // Saturate rather than wrap. A wrapped depth would alias an inner xret
+  // onto the outermost one and hand a compartment's bounds to a handler --
+  // the identical failure this mechanism exists to prevent. At the ceiling
+  // the chain is no longer countable, so it is no longer reconstructible.
+  if veda_trap_depth == 0xFF then veda_trap_poison = true
+  else veda_trap_depth = veda_trap_depth + 1;
   veda_pcc_base = zeros();
   veda_pcc_length = VEDA_PCC_UNBOUNDED;
   // R10: the CRBR half of the same trap discipline, folded into this one
@@ -176,11 +248,48 @@ function veda_pcc_save_and_reset() -> unit = {
 // live PCC, immediately reset them back to the unbounded sentinel, so a
 // saved value is never applied to more than one mret/sret.
 function veda_pcc_restore_on_xret() -> unit = {
-  if veda_mepcc_length != VEDA_PCC_UNBOUNDED then {
-    veda_pcc_base = veda_mepcc_base;
-    veda_pcc_length = veda_mepcc_length;
-    veda_mepcc_base = zeros();
-    veda_mepcc_length = VEDA_PCC_UNBOUNDED;
+  // R12. The old guard tested veda_mepcc_length against the sentinel --
+  // a VALIDITY question answered with an in-band VALUE, which is exactly
+  // what made a clobbered save read as "nothing was saved" and resume a
+  // compartment UNBOUNDED. Occupancy is now carried out of band by depth.
+  if veda_trap_depth != zeros() then {
+    veda_trap_depth = veda_trap_depth - 1;
+    if veda_trap_depth == zeros() then {
+      if veda_trap_poison then {
+        // FAIL CLOSED. The chain could not be reconstructed, so we do not
+        // guess at a context. A zero-length PCC faults on the very next
+        // fetch, before any instruction executes -- loud, and incapable of
+        // granting anything. The alternative, restoring the reset context,
+        // would hand unbounded authority to a level that was narrowed:
+        // R12 again, one level up.
+        //
+        // Direction check against the ratified precedent: RISC-V's
+        // Smdbltrp answers this same condition with a critical-error state
+        // that updates no architectural state at all. Denying and
+        // continuing is strictly gentler than that, and no weaker in
+        // direction.
+        veda_pcc_base = zeros();
+        veda_pcc_length = zeros();
+      } else {
+        veda_pcc_base = veda_mepcc_base;
+        veda_pcc_length = veda_mepcc_length;
+      };
+      veda_mepcc_base = zeros();
+      veda_mepcc_length = VEDA_PCC_UNBOUNDED;
+      veda_trap_poison = false;
+    } else {
+      // Unwinding an inner level. Its context was the reset context by
+      // construction -- every trap resets PCC before the handler runs --
+      // so it is reconstructed rather than stored. This is why one slot
+      // plus a counter is LOSSLESS here and not an approximation.
+      if veda_trap_poison then {
+        veda_pcc_base = zeros();
+        veda_pcc_length = zeros();
+      } else {
+        veda_pcc_base = zeros();
+        veda_pcc_length = VEDA_PCC_UNBOUNDED;
+      }
+    }
   };
   // R10: the CRBR restore rides the same xret, but under its OWN sentinel
   // guard (VEDA_REGION_NONE), deliberately NOT inside the mepcc guard
@@ -369,19 +478,19 @@ function clause read_CSR(0x7C5) = zero_extend(veda_mode)
 // cannot use it for anything without separately satisfying that
 // unrelated check -- considered and correctly excluded, not overlooked.
 function clause write_CSR(0x7C0, value) = {
-  if veda_pcc_length != VEDA_PCC_UNBOUNDED then { veda_pcc_save_and_reset(); Err(()) }
+  if veda_pcc_length != VEDA_PCC_UNBOUNDED then { Err(()) }
   else { let v64 : bits(64) = zero_extend(value); veda_pcc_base = v64[55..0]; Ok(veda_to_xlen(zero_extend(veda_pcc_base))) }
 }
 function clause write_CSR(0x7C1, value) = {
-  if veda_pcc_length != VEDA_PCC_UNBOUNDED then { veda_pcc_save_and_reset(); Err(()) }
+  if veda_pcc_length != VEDA_PCC_UNBOUNDED then { Err(()) }
   else { let v64 : bits(64) = zero_extend(value); veda_pcc_length = v64[39..0]; Ok(veda_to_xlen(zero_extend(veda_pcc_length))) }
 }
 function clause write_CSR(0x7C2, value) = {
-  if veda_pcc_length != VEDA_PCC_UNBOUNDED then { veda_pcc_save_and_reset(); Err(()) }
+  if veda_pcc_length != VEDA_PCC_UNBOUNDED then { Err(()) }
   else { let v64 : bits(64) = zero_extend(value); veda_mepcc_base = v64[55..0]; Ok(veda_to_xlen(zero_extend(veda_mepcc_base))) }
 }
 function clause write_CSR(0x7C3, value) = {
-  if veda_pcc_length != VEDA_PCC_UNBOUNDED then { veda_pcc_save_and_reset(); Err(()) }
+  if veda_pcc_length != VEDA_PCC_UNBOUNDED then { Err(()) }
   else { let v64 : bits(64) = zero_extend(value); veda_mepcc_length = v64[39..0]; Ok(veda_to_xlen(zero_extend(veda_mepcc_length))) }
 }
 function clause write_CSR(0x7C4, value) = { veda_attr = zero_extend(value); Ok(veda_to_xlen(veda_attr)) }
@@ -406,7 +515,7 @@ function clause write_CSR(0x7C4, value) = { veda_attr = zero_extend(value); Ok(v
 // disable Milestone 19's own purecap enforcement out from under itself.
 // Gated identically.
 function clause write_CSR(0x7C5, value) = {
-  if veda_pcc_length != VEDA_PCC_UNBOUNDED then { veda_pcc_save_and_reset(); Err(()) }
+  if veda_pcc_length != VEDA_PCC_UNBOUNDED then { Err(()) }
   else {
     if cur_privilege == Machine then veda_mode = zero_extend(value[0..0]);
     Ok(zero_extend(veda_mode))
@@ -595,6 +704,52 @@ function veda_crbr_load(region : bits(20)) -> unit = {
 // handler always runs in the root domain, never in the faulting
 // compartment's -- otherwise a handler could page out the very region its
 // own CRBR still names (the second escape path R10 records).
+// R12: "does the level being entered carry context a counter cannot
+// reconstruct?" Every trap resets PCC to unbounded and the region to root
+// before the handler runs, so an inner level is normally reconstructible
+// and needs no slot. The exception is a handler that narrowed ITSELF --
+// by OCInvoke, or by writing 0x7C0/0x7C1, which the CSR gates permit
+// precisely while unbounded -- and then faulted. That state is real, one
+// slot cannot hold it, and reconstruction would be a guess.
+//
+// Both halves are tested because they move independently: OCInvoke changes
+// PCC and region together, but a CSR write to 0x7C0/0x7C1 changes only
+// PCC, and R10 established that an unbounded code object in a non-root
+// region leaves PCC unbounded while the CRBR names that region.
+// R12, and this is a Veda-Core-specific case with no RISC-V counterpart.
+//
+// A depth counter borrows RISC-V's assumption that a trap is left by an
+// xret. This architecture has a SECOND exit: the trusted switcher leaves a
+// trap handler by OCRETURN, and it is not free to do otherwise -- narrowing
+// PCC with csrw and then falling through to a separate mret requires
+// FETCHING that mret, which by then lies outside the just-narrowed bounds.
+// The scheduler test records that as an empirically-found correctness gap,
+// so the pattern is load-bearing, not incidental.
+//
+// The right semantics follow from what OCRETURN already does: it installs
+// PCC from its own operand, so any saved context is superseded by
+// definition. The frame is therefore ABANDONED, not restored -- discard
+// the slot and drop the depth. Restoring instead would overwrite the
+// bounds OCRETURN just legitimately installed.
+//
+// No authority is gained: the caller ends up with exactly the bounds of a
+// sentry it already holds. And poison is cleared with the frame, because
+// the chain it referred to has been deliberately discarded rather than
+// unwound.
+function veda_trap_frame_abandon() -> unit = {
+  if veda_trap_depth != zeros() then {
+    veda_trap_depth = veda_trap_depth - 1;
+    if veda_trap_depth == zeros() then {
+      veda_mepcc_base = zeros();
+      veda_mepcc_length = VEDA_PCC_UNBOUNDED;
+      veda_trap_poison = false;
+    }
+  }
+}
+
+function veda_trap_level_has_context() -> bool =
+  veda_pcc_length != VEDA_PCC_UNBOUNDED | veda_current_region != zeros()
+
 function veda_crbr_save_and_reset() -> unit = {
   if veda_current_region != zeros() then {
     veda_saved_region      = veda_current_region;
