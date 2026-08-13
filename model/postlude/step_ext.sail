@@ -39,6 +39,8 @@ function ext_reset() -> unit = {
   veda_mepcc_base = zeros();
   veda_mepcc_length = VEDA_PCC_UNBOUNDED;
   veda_trap_depth = zeros();
+  veda_pcc_object = VEDA_OBJECT_NONE;
+  veda_mepcc_object = VEDA_OBJECT_NONE;
   veda_trap_poison = false;
   // R10: the saved-CRBR pair resets to its own "nothing saved" sentinel,
   // the exact analogue of the mepcc pair above (region 0 is a legitimate

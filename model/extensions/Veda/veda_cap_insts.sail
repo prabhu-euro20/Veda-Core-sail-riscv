@@ -569,6 +569,13 @@ function clause execute VEDA_OCINVOKE(rs2, rs1) = {
     // silently mis-bound the compartment, which is a real escape.
     veda_pcc_base = cs1.Base;
     veda_pcc_length = cs1.Length;
+    // R11(b): the compartment's NAME travels with its bounds. This is the
+    // only place a real object identity can be installed -- these two
+    // crossings are the only writers of PCC from a capability -- and having
+    // it is what lets eviction refuse to pull the code out from under a
+    // running compartment. cs1 was revalidated against the ODT just above
+    // by R11(a), so the name recorded here is known-live at this instant.
+    veda_pcc_object = cs1.Object_ID;
     // R10: the CRBR is loaded HERE, adjacent to the PCC narrowing --
     // "loaded at domain entry exactly as veda_pcc_base is" (DESIGN_08
     // Section 4), now real rather than prose. The region was validated
@@ -785,6 +792,13 @@ function clause execute VEDA_OCRETURN(rs1) = {
     // silently mis-bound the compartment, which is a real escape.
     veda_pcc_base = cs1.Base;
     veda_pcc_length = cs1.Length;
+    // R11(b): the compartment's NAME travels with its bounds. This is the
+    // only place a real object identity can be installed -- these two
+    // crossings are the only writers of PCC from a capability -- and having
+    // it is what lets eviction refuse to pull the code out from under a
+    // running compartment. cs1 was revalidated against the ODT just above
+    // by R11(a), so the name recorded here is known-live at this instant.
+    veda_pcc_object = cs1.Object_ID;
     // R10: reload the CRBR for the domain being re-entered, exactly as
     // OCInvoke does on the way in -- return is a real compartment-boundary
     // crossing (the SSC clear below already records that lesson).

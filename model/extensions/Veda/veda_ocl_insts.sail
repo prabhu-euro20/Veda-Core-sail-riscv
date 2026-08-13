@@ -431,6 +431,24 @@ function clause execute VEDA_ODT_POPULATE(rs2, rs1, rd) = {
     // RV64-only, but that gate is invisible to the type checker here).
     let object_id_gpr64 : bits(64) = zero_extend(X(rs1));
     let object_id : bits(44) = object_id_gpr64[43..0];
+    // R11(b) (DESIGN_07 Tier H): POPULATE IS AN EVICTION PATH TOO, and it
+    // is the one that made the refusal BYPASSABLE rather than partial.
+    // Repopulating a still-VALID slot bumps the generation (killing every
+    // outstanding capability) AND repoints Base/Length/Perms -- everything
+    // Destroy does, and more. An authority refused a Destroy on the running
+    // compartment's code object could simply re-populate it instead, and
+    // PCC would keep executing the cached old Base while the object it
+    // names now backs something else entirely.
+    //
+    // Found by reading the RTL for an unrelated reason, which is a bad way
+    // to find a bypass. The complete consumer set of this predicate is
+    // answerable exactly -- every instruction that can change an entry's
+    // identity or backing -- and it is Populate, Populate-Fast, Destroy and
+    // page-out. Page-in is deliberately NOT in it: it already refuses
+    // unless the object is non-resident, and an executing object is
+    // necessarily resident.
+    if veda_object_is_executing(object_id) then Illegal_Instruction()
+    else {
     let descriptor : bits(64) = zero_extend(X(rs2));
     let old_entry = odt_lookup(object_id);
     // RTL Milestone 16 mirror (veda_types.sail's own `retired` field
@@ -492,6 +510,7 @@ function clause execute VEDA_ODT_POPULATE(rs2, rs1, rd) = {
       RETIRE_SUCCESS
     }
   }
+  }
 }
 
 function clause execute VEDA_ODT_DESTROY(rs1, rd) = {
@@ -502,6 +521,24 @@ function clause execute VEDA_ODT_DESTROY(rs1, rd) = {
     // RV64-only, but that gate is invisible to the type checker here).
     let object_id_gpr64 : bits(64) = zero_extend(X(rs1));
     let object_id : bits(44) = object_id_gpr64[43..0];
+    // R11(b): you may not destroy the code you are running, nor the code a
+    // pending return still owes. Without this, Destroy revokes every DATA
+    // view of an object while the PCC keeps executing it from cached bounds
+    // -- execute-after-free, the half R11(a) structurally could not reach.
+    //
+    // THE HONEST COST. On this hart revocation is never actually blocked: a
+    // trap resets PCC to no-object, so a handler can always abandon the
+    // frame and then destroy. What that forces is a DELIBERATE act -- "I am
+    // not returning to this compartment" -- stated before the object dies,
+    // rather than the object dying under a compartment that still expects to
+    // resume. On ANOTHER hart the refusal is real: an object being executed
+    // elsewhere cannot be destroyed until that hart is stopped. That is the
+    // same bargain a conventional machine strikes when it cannot unmap a
+    // page another core is running from without interrupting it, and it is
+    // preferred here over the alternative, which is letting the other hart
+    // keep executing freed memory.
+    if veda_object_is_executing(object_id) then Illegal_Instruction()
+    else {
     let old_entry = odt_lookup(object_id);
     // RTL Milestone 16: Destroy always bumps (unlike Populate, it is not
     // itself gated by `retired` -- destroying an already-retired slot is
@@ -529,6 +566,7 @@ function clause execute VEDA_ODT_DESTROY(rs1, rd) = {
     });
     X(rd) = zeros();
     RETIRE_SUCCESS
+    }
   }
 }
 
@@ -578,6 +616,24 @@ function clause execute VEDA_ODT_POPULATE_FAST(rs2, rs1, rd) = {
     // RV64-only, but that gate is invisible to the type checker here).
     let object_id_gpr64 : bits(64) = zero_extend(X(rs1));
     let object_id : bits(44) = object_id_gpr64[43..0];
+    // R11(b) (DESIGN_07 Tier H): POPULATE IS AN EVICTION PATH TOO, and it
+    // is the one that made the refusal BYPASSABLE rather than partial.
+    // Repopulating a still-VALID slot bumps the generation (killing every
+    // outstanding capability) AND repoints Base/Length/Perms -- everything
+    // Destroy does, and more. An authority refused a Destroy on the running
+    // compartment's code object could simply re-populate it instead, and
+    // PCC would keep executing the cached old Base while the object it
+    // names now backs something else entirely.
+    //
+    // Found by reading the RTL for an unrelated reason, which is a bad way
+    // to find a bypass. The complete consumer set of this predicate is
+    // answerable exactly -- every instruction that can change an entry's
+    // identity or backing -- and it is Populate, Populate-Fast, Destroy and
+    // page-out. Page-in is deliberately NOT in it: it already refuses
+    // unless the object is non-resident, and an executing object is
+    // necessarily resident.
+    if veda_object_is_executing(object_id) then Illegal_Instruction()
+    else {
     // Increment 3: Base is taken at its full 56-bit width from the GPR --
     // this is the WIDE populate path. Sliced out of an explicit 64-bit
     // widening for the usual reason (a direct xlenbits[55..0] is not
@@ -619,6 +675,7 @@ function clause execute VEDA_ODT_POPULATE_FAST(rs2, rs1, rd) = {
       X(rd) = zeros();
       RETIRE_SUCCESS
     }
+  }
   }
 }
 
@@ -699,7 +756,12 @@ function clause execute VEDA_ODT_PAGE_OUT(rs1, rd) = {
     // nothing to evict; an already-paged-out one would bump generation a
     // second time for no benefit, burning the budget and invalidating the
     // capabilities a pending page-in was about to serve.
-    if not(old_entry.valid) | not(old_entry.resident) then Illegal_Instruction()
+    // R11(b): refuse to evict the object backing the running compartment or
+    // the one a pending return owes. Placed FIRST deliberately -- an
+    // executing object is refused whether or not it is otherwise evictable,
+    // so no future relaxation of the residency gates below can open this.
+    if veda_object_is_executing(object_id) then Illegal_Instruction()
+    else if not(old_entry.valid) | not(old_entry.resident) then Illegal_Instruction()
     // The saturation refusal described above.
     else if old_entry.generation == 0xffffff then Illegal_Instruction()
     else {

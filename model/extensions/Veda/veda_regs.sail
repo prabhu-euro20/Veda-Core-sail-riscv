@@ -111,6 +111,36 @@ register veda_mepcc_base : bits(56)
 register veda_mepcc_length : bits(40)
 
 // ═══════════════════════════════════════════════════════════════════════
+//  R11(b) (DESIGN_07 Tier H) -- PCC CARRIES AN OBJECT IDENTITY.
+//
+//  R11(a) closed ONE of two execute-after-free windows: entering an object
+//  that was evicted while you were not running it. It does nothing about
+//  the other -- eviction of the object you are CURRENTLY EXECUTING -- and
+//  it cannot, because instruction fetch compares the PC against PCC and
+//  never re-reads the table. PCC held Base and Length and no name, so the
+//  hardware could not even say which object backs the running compartment.
+//
+//  With a name, eviction can simply REFUSE: you may not page out or destroy
+//  the code you are running. That puts the cost on the rare event (an
+//  eviction) rather than on every fetch, which is the same principle that
+//  settled DESIGN_02's cached-Base decision.
+//
+//  THE SAVED FRAME IS PINNED TOO, and that is only correct because of R12.
+//  Pinning MEPCC was rejected earlier for a real reason: a scheduler that
+//  permanently abandons a compartment would keep its code object pinned
+//  forever, with nothing to release it. R12's OCRETURN-abandon dissolves
+//  that -- a switcher leaving by OCRETURN drops the frame and clears the
+//  slot, so the pin is released exactly when the compartment is genuinely
+//  abandoned. The earlier objection was correct then and is void now.
+//
+//  Out of band, like the trap depth: VEDA_OBJECT_NONE is a region field of
+//  all ones, which no RT window can ever resolve, so it cannot collide with
+//  a real Object_ID. Same discipline as VEDA_REGION_NONE below.
+let VEDA_OBJECT_NONE : bits(44) = 0xFFFFFFFFFFF
+register veda_pcc_object : bits(44)
+register veda_mepcc_object : bits(44)
+
+// ═══════════════════════════════════════════════════════════════════════
 //  R12 (DESIGN_07 Tier H) -- OUT-OF-BAND TRAP NESTING STATE.
 //
 //  WHY AN OUT-OF-BAND BIT AT ALL. VEDA_PCC_UNBOUNDED was being made to
@@ -181,6 +211,7 @@ function veda_pcc_save_and_reset() -> unit = {
   if veda_trap_depth == zeros() then {
     veda_mepcc_base = veda_pcc_base;
     veda_mepcc_length = veda_pcc_length;
+    veda_mepcc_object = veda_pcc_object;   // R11(b): the name travels with the frame
   } else {
     // A nested trap. Ordinarily harmless: the handler runs with PCC
     // already reset, so the level being entered has no context worth
@@ -203,6 +234,17 @@ function veda_pcc_save_and_reset() -> unit = {
   else veda_trap_depth = veda_trap_depth + 1;
   veda_pcc_base = zeros();
   veda_pcc_length = VEDA_PCC_UNBOUNDED;
+  // R11(b): the handler is not running any object's code -- it runs
+  // unbounded at mtvec -- so it must not carry the callee's name. Leaving
+  // the name behind would pin an object the handler is not executing, and
+  // a handler is exactly the code that legitimately evicts things.
+  //
+  // NOTHING IS LOST BY CLEARING. While the return is owed, the SAVED name
+  // pins the same object, so the protection is unchanged; only the false
+  // claim goes away. This project has already paid once for a value that
+  // meant two things at once, and "PCC's name" meaning both "what I am
+  // running" and "what I last ran" is that same shape.
+  veda_pcc_object = VEDA_OBJECT_NONE;
   // R10: the CRBR half of the same trap discipline, folded into this one
   // function so every existing save site (veda_trap, the fetch/data check
   // errors, the CSR write gates, handle_trap_extension) inherits it at
@@ -273,9 +315,11 @@ function veda_pcc_restore_on_xret() -> unit = {
       } else {
         veda_pcc_base = veda_mepcc_base;
         veda_pcc_length = veda_mepcc_length;
+        veda_pcc_object = veda_mepcc_object;
       };
       veda_mepcc_base = zeros();
       veda_mepcc_length = VEDA_PCC_UNBOUNDED;
+      veda_mepcc_object = VEDA_OBJECT_NONE;
       veda_trap_poison = false;
     } else {
       // Unwinding an inner level. Its context was the reset context by
@@ -749,10 +793,23 @@ function veda_trap_frame_abandon() -> unit = {
     if veda_trap_depth == zeros() then {
       veda_mepcc_base = zeros();
       veda_mepcc_length = VEDA_PCC_UNBOUNDED;
+      // R11(b): abandoning the frame releases its pin. This is precisely
+      // what makes pinning the saved name safe -- a scheduler that walks
+      // away from a compartment can then evict its code object.
+      veda_mepcc_object = VEDA_OBJECT_NONE;
       veda_trap_poison = false;
     }
   }
 }
+
+// R11(b): may this object be evicted? Refuses the object backing the code
+// currently executing, and the one a pending return still owes. Reading the
+// live PCC is unconditional; the saved name only counts while a frame is
+// actually held, which the depth answers out of band rather than by
+// comparing a value -- the same distinction R12 turned on.
+function veda_object_is_executing(object_id : bits(44)) -> bool =
+  (object_id == veda_pcc_object)
+  | (veda_trap_depth != zeros() & object_id == veda_mepcc_object)
 
 function veda_trap_level_has_context() -> bool =
   veda_pcc_length != VEDA_PCC_UNBOUNDED | veda_current_region != zeros()
