@@ -414,6 +414,12 @@ mapping clause csr_name_map = 0x7C5 <-> "veda_mode"
 // established "capability metadata is always inspectable" principle.
 mapping clause csr_name_map = 0x7C6 <-> "veda_current_region"
 mapping clause csr_name_map = 0x7C7 <-> "veda_saved_region"
+// R12: read-only status for the trap-nesting state. Without it the depth
+// and poison bits are architecturally invisible, and a handler cannot tell
+// WHY a return was denied. Read-only by construction, following 0x7C6/7:
+// software may already forge the saved mepcc VALUE via 0x7C2/0x7C3, and
+// must not additionally be able to forge the OCCUPANCY.
+mapping clause csr_name_map = 0x7C8 <-> "veda_trap_status"
 
 function clause is_CSR_accessible(0x7C0, _, _) = currentlyEnabled(Ext_Veda)
 function clause is_CSR_accessible(0x7C1, _, _) = currentlyEnabled(Ext_Veda)
@@ -426,6 +432,7 @@ function clause is_CSR_accessible(0x7C5, _, _) = currentlyEnabled(Ext_Veda)
 // is why no write_CSR(0x7C6/0x7C7) clause exists or is needed.
 function clause is_CSR_accessible(0x7C6, _, access_type) = currentlyEnabled(Ext_Veda) & (access_type == CSRRead)
 function clause is_CSR_accessible(0x7C7, _, access_type) = currentlyEnabled(Ext_Veda) & (access_type == CSRRead)
+function clause is_CSR_accessible(0x7C8, _, access_type) = currentlyEnabled(Ext_Veda) & (access_type == CSRRead)
 
 function clause read_CSR(0x7C0) = veda_to_xlen(zero_extend(veda_pcc_base))
 function clause read_CSR(0x7C1) = veda_to_xlen(zero_extend(veda_pcc_length))
@@ -790,6 +797,8 @@ function veda_crbr_restore_on_xret() -> unit = {
 // them. Accessibility and the name map are declared up with the others.
 function clause read_CSR(0x7C6) = zero_extend(veda_current_region)
 function clause read_CSR(0x7C7) = zero_extend(veda_saved_region)
+// {poison, depth}: bit 8 is poison, bits 7..0 are the depth.
+function clause read_CSR(0x7C8) = zero_extend([bool_to_bit(veda_trap_poison)] @ veda_trap_depth)
 
 // Resolve a region's ODT base: the CRBR for the current region (the fast
 // path, no RT read), the RT otherwise. Out-of-modeled-window regions get a
