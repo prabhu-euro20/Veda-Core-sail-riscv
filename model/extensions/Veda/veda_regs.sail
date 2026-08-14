@@ -807,6 +807,19 @@ function veda_trap_frame_abandon() -> unit = {
 // live PCC is unconditional; the saved name only counts while a frame is
 // actually held, which the depth answers out of band rather than by
 // comparing a value -- the same distinction R12 turned on.
+// May the currently executing code bind this object? The object decides.
+//
+// Takes the entry Bind has ALREADY read, so this adds no table access at all --
+// two comparisons on values in registers. The first draft did its own
+// odt_lookup and the comment above it claimed otherwise; on a machine
+// deliberately built without caches a second DRAM read per Bind is a real,
+// permanent cost, so the claim had to become true rather than the comment
+// become vaguer.
+function veda_bind_domain_ok(owner_domain : bits(20)) -> bool =
+  if owner_domain == VEDA_DOMAIN_ANY then true
+  else if veda_pcc_object == VEDA_OBJECT_NONE then true
+  else owner_domain == veda_pcc_object[43 .. 24]
+
 function veda_object_is_executing(object_id : bits(44)) -> bool =
   (object_id == veda_pcc_object)
   | (veda_trap_depth != zeros() & object_id == veda_mepcc_object)
@@ -967,6 +980,7 @@ function veda_test_seed_odt() -> unit = {
     owner_hart = VEDA_OWNER_UNOWNED,
     retired    = false,
     resident   = true,   // DESIGN_02: seeded objects are present in memory
+    owner_domain = VEDA_DOMAIN_ANY,
   });
   // Milestone V-B addition: a second seeded object, deliberately *without*
   // Permit_NMC_Compute (Perms = 0x000C, Load+Store only), so a real
@@ -981,6 +995,7 @@ function veda_test_seed_odt() -> unit = {
     owner_hart = VEDA_OWNER_UNOWNED,
     retired    = false,
     resident   = true,   // DESIGN_02: seeded objects are present in memory
+    owner_domain = VEDA_DOMAIN_ANY,
   });
   // Milestone V-B addition: a third seeded object for use as a CSeal/
   // CUnseal type-authority capability -- Perms = 0x300 (Permit_Seal, bit
@@ -996,6 +1011,7 @@ function veda_test_seed_odt() -> unit = {
     owner_hart = VEDA_OWNER_UNOWNED,
     retired    = false,
     resident   = true,   // DESIGN_02: seeded objects are present in memory
+    owner_domain = VEDA_DOMAIN_ANY,
   });
   // Milestone V-B addition: a fourth seeded object identical to Object_ID
   // 3 except *without* Permit_Seal/Permit_Unseal, so a real negative test
@@ -1009,6 +1025,7 @@ function veda_test_seed_odt() -> unit = {
     owner_hart = VEDA_OWNER_UNOWNED,
     retired    = false,
     resident   = true,   // DESIGN_02: seeded objects are present in memory
+    owner_domain = VEDA_DOMAIN_ANY,
   });
   // Milestone 12 addition: a fifth seeded object, pre-claimed by a
   // hypothetical OTHER hart (99 -- distinct from this real, single-
@@ -1034,6 +1051,7 @@ function veda_test_seed_odt() -> unit = {
     // indistinguishable in the test but wrong in meaning -- this object is
     // present in memory, it simply belongs to another hart.
     resident   = true,
+    owner_domain = VEDA_DOMAIN_ANY,
   });
   // ── DESIGN_02 residency fixtures ────────────────────────────────────
   // Object_ID 600: an object that EXISTS (valid, sane Base/Length/Perms)
@@ -1058,6 +1076,7 @@ function veda_test_seed_odt() -> unit = {
     owner_hart = VEDA_OWNER_UNOWNED,
     retired    = false,
     resident   = false,  // THE fixture: the object exists, but is paged out
+    owner_domain = VEDA_DOMAIN_ANY,
   });
   // Object_ID 611: the PAGE-OUT saturation fixture (DESIGN_02 increment 2).
   // Seeded ONE step below the 24-bit ceiling, so a single page-out reaches
@@ -1079,6 +1098,7 @@ function veda_test_seed_odt() -> unit = {
     owner_hart = VEDA_OWNER_UNOWNED,
     retired    = false,
     resident   = true,
+    owner_domain = VEDA_DOMAIN_ANY,
   });
   // Object_ID 614: the GENERATION-PRESERVATION fixture. Seeded TWO steps
   // below the ceiling, deliberately not one.
@@ -1101,6 +1121,7 @@ function veda_test_seed_odt() -> unit = {
     owner_hart = VEDA_OWNER_UNOWNED,
     retired    = false,
     resident   = true,
+    owner_domain = VEDA_DOMAIN_ANY,
   });
   // Object_ID 615: the OWNERSHIP-PRESERVATION fixture -- live, resident, and
   // owned by a DIFFERENT hart (0x63 = 99, the same stand-in the Milestone-12
@@ -1124,6 +1145,7 @@ function veda_test_seed_odt() -> unit = {
     owner_hart = 0x63,
     retired    = false,
     resident   = true,
+    owner_domain = VEDA_DOMAIN_ANY,
   });
   // Phase 1 increment 4: a sixth seeded object whose generation counter is
   // placed ONE below the real 24-bit retirement threshold (0xFFFFFE, i.e.
@@ -1146,6 +1168,7 @@ function veda_test_seed_odt() -> unit = {
     owner_hart = VEDA_OWNER_UNOWNED,
     retired    = false,
     resident   = true,   // DESIGN_02: seeded objects are present in memory
+    owner_domain = VEDA_DOMAIN_ANY,
   });
   // DESIGN_08 Sail experiment -- two cross-region seeds.
   // (A) region=1, local=1: Object_ID = (1 << 24) | 1. Its region is RESIDENT
@@ -1163,6 +1186,7 @@ function veda_test_seed_odt() -> unit = {
     owner_hart = VEDA_OWNER_UNOWNED,
     retired    = false,
     resident   = true,   // DESIGN_02: seeded objects are present in memory
+    owner_domain = VEDA_DOMAIN_ANY,
   });
   // (B) region=2, local=7: Object_ID = (2 << 24) | 7. Region 2 is NON-RESIDENT
   // (RT[2].region_resident=false), so the object exists in the modeled backing
@@ -1177,6 +1201,7 @@ function veda_test_seed_odt() -> unit = {
     owner_hart = VEDA_OWNER_UNOWNED,
     retired    = false,
     resident   = true,   // DESIGN_02: seeded objects are present in memory
+    owner_domain = VEDA_DOMAIN_ANY,
   });
   // ── R10 test scaffold: three CRF seeds naming region 2 ──────────────
   // A region-2 capability CANNOT be obtained at runtime, and that is the

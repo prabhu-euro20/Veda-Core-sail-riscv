@@ -105,6 +105,12 @@ let VEDA_CAUSE_REGION_FAULT : bits(5) = 0b01001 // 0x09
 // (VEDA_CORE_SPEC.md Section 3's cause table still calls 0x08-0x0f reserved
 // and is now stale by three values: 0x08, 0x09 and this one.)
 let VEDA_CAUSE_RESIDENCY_FAULT : bits(5) = 0b01010 // 0x0A
+// The OBJECT's own policy refused this caller. Its own cause, not a reuse of
+// OWNER_VIOLATION (0x06, "another HART holds it") or REGION_FAULT (0x09, "that
+// domain's table is paged out"): those two ask software to release something or
+// to page something in. This one asks for nothing, because the caller was never
+// entitled to the object at all.
+let VEDA_CAUSE_DOMAIN_VIOLATION : bits(5) = 0b01011 // 0x0B
 
 function veda_xtval(cap_idx : bits(4), cause : bits(5)) -> xlenbits = {
   // Deliberately avoids the two-argument `zero_extend(bits, width)` form --
@@ -208,6 +214,8 @@ function clause execute VEDA_BINDINST(mode_bits, rs1, rd) = {
     // `false` would make the second access to every object fault, breaking
     // every dereferencing test. Only the carry-over is right.
     resident   = e.resident,
+    // Claiming an object for this hart must not alter its POLICY.
+    owner_domain = e.owner_domain,
   };
 
   // DESIGN_02 -- OBJECT residency gate. Guarded on `e.valid` so the
@@ -222,7 +230,33 @@ function clause execute VEDA_BINDINST(mode_bits, rs1, rd) = {
   // soft-fail condition. If Bind-NoTrap or Rebind merely cleared Tag here,
   // the caller would be told "no such object" and the pager would never be
   // invoked -- a live object would look permanently destroyed.
-  if e.valid & not(e.resident) then veda_trap(rd, VEDA_CAUSE_RESIDENCY_FAULT)
+  // ═══ PER-OBJECT BIND AUTHORITY ═══
+  //
+  // The object itself says who may bind it. Three ways to pass: the object is
+  // OPEN (VEDA_DOMAIN_ANY, which is how every object is created, so this
+  // changes nothing until software narrows one); the caller is in no
+  // compartment at all (boot code and trap handlers -- the bootstrap and the
+  // pager); or the caller's domain matches.
+  //
+  // PER-OBJECT, NOT PER-REGION, and that is the whole lesson of the retracted
+  // R17. A region-granular rule broke the RETURN PATH: a compartment's caller
+  // lives in another domain by definition, so forbidding cross-domain Bind made
+  // compartments one-way and livelocked a test. Here the return object is left
+  // open while its neighbours are narrowed -- which is what legitimate sharing
+  // actually looks like.
+  //
+  // The subject is veda_pcc_object, never veda_current_region: that register is
+  // zero at reset and reset again on every trap, and region zero is ALSO a real
+  // domain, so "no domain" and "domain 0" would be one value. PCC's name has an
+  // out-of-band NONE no real object can hold.
+  //
+  // BEFORE residency, deliberately. Residency says "page this in"; this says
+  // "you were never entitled". Telling a caller with no right to the object to
+  // go run the pager is worse than useless -- it is a hint about an object that
+  // is none of its business. Same ordering argument DESIGN_02 used to put
+  // residency last among the entry-derived tests.
+  if not(veda_bind_domain_ok(e.owner_domain)) then veda_trap(rd, VEDA_CAUSE_DOMAIN_VIOLATION)
+  else if e.valid & not(e.resident) then veda_trap(rd, VEDA_CAUSE_RESIDENCY_FAULT)
   else
 
   match mode {

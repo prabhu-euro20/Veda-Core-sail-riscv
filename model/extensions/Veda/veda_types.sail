@@ -244,6 +244,16 @@ function permBit(perms : bits(16), b : range(0,15)) -> bool = perms[b] == 0b1
 // repopulated) belongs to no hart until the first real Bind claims it.
 let VEDA_OWNER_UNOWNED : bits(8) = 0xFF
 
+// "any domain may bind this object" -- the value every object is created with.
+// 0xFFFFF cannot collide with a genuine domain because no region-table window
+// resolves it. It shares its numeric value with VEDA_REGION_NONE but is a
+// different field with a different meaning, and the two are never compared.
+//
+// Defined HERE rather than beside the other region constants: Sail processes
+// files in order and this one comes first, so a constant used by this struct
+// has to live with the struct.
+let VEDA_DOMAIN_ANY : bits(20) = 0xFFFFF
+
 struct odt_entry = {
   valid      : bool,
   // Phase 1 increment 3: Base 32 -> 56 and Length 16 -> 40, matching the
@@ -314,6 +324,26 @@ struct odt_entry = {
   // strictly worse than no bit at all. Residency is table-only, read fresh
   // on every use.
   resident   : bool,
+  // POLICY, not identity -- and that distinction is the whole point of this
+  // field and of the instruction that writes it.
+  //
+  // Base, Length and generation say WHAT an object is. Changing any of them
+  // makes it a DIFFERENT object, which is exactly why only Populate and
+  // Destroy may touch them and why both bump the generation, killing every
+  // outstanding capability. That is correct and must stay.
+  //
+  // owner_domain says how an object may be USED. Changing it does not change
+  // what the object is, so it must NOT kill outstanding capabilities -- and
+  // today there is no way to express that at all: the only way to alter an
+  // entry is Populate, which bumps the generation and destroys the very
+  // sharing the policy is about.
+  //
+  // VEDA_DOMAIN_ANY means "any domain may bind this". Every object is created
+  // that way, so this field changes nothing until software deliberately
+  // narrows an object -- mechanism first, policy second. The retracted R17
+  // proved why that order matters: a rule applied by default broke the
+  // return path and made compartments one-way.
+  owner_domain : bits(20),
 }
 
 let empty_odt_entry : odt_entry = struct {
@@ -328,6 +358,13 @@ let empty_odt_entry : odt_entry = struct {
   // why check ORDER is load-bearing: such a slot is now BOTH invalid and
   // non-resident, and "never existed" must keep winning over "paged out".
   resident   = false,
+  // A not-found lookup reports OPEN, not "owned by nobody", because there is
+  // no value that means nobody: all 2^20 domains are legal and 0xFFFFF is
+  // taken by ANY. Reporting a foreign domain here would usefully hide whether
+  // an object EXISTS -- a real improvement -- but it needs a third state this
+  // field cannot express, so it is left for its own increment rather than
+  // half-built here.
+  owner_domain = VEDA_DOMAIN_ANY,
 }
 
 // DESIGN_08 -- the Object-namespace scale decision. A Region Table (RT)

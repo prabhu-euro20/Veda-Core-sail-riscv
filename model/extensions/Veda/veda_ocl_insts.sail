@@ -528,6 +528,7 @@ function clause execute VEDA_ODT_POPULATE(rs2, rs1, rd) = {
         // old value over would leave a just-populated object faulting
         // forever, which is why this is spelled out rather than inherited.
         resident   = true,
+        owner_domain = old_entry.owner_domain,
       });
       X(rd) = zeros();
       RETIRE_SUCCESS
@@ -586,6 +587,7 @@ function clause execute VEDA_ODT_DESTROY(rs1, rd) = {
       // something that was deliberately revoked. Set for state hygiene, so
       // no path can ever read a stale `resident = true` off a dead slot.
       resident   = false,
+      owner_domain = VEDA_DOMAIN_ANY,
     });
     X(rd) = zeros();
     RETIRE_SUCCESS
@@ -694,6 +696,7 @@ function clause execute VEDA_ODT_POPULATE_FAST(rs2, rs1, rd) = {
         // old value over would leave a just-populated object faulting
         // forever, which is why this is spelled out rather than inherited.
         resident   = true,
+        owner_domain = VEDA_DOMAIN_ANY,
       });
       X(rd) = zeros();
       RETIRE_SUCCESS
@@ -732,6 +735,68 @@ mapping clause assembly = VEDA_ODT_POPULATE_FAST(rs2, rs1, rd)
 //  re-permission the object, whereas PAGE-IN preserves owner_hart, Length
 //  and Perms. Paging an object may move it; it may not re-authorize it.
 // ─────────────────────────────────────────────────────────────────────────
+
+// ═══ veda.odt.set.domain -- THE POLICY WRITE PATH ═══
+//
+// The first instruction in this design that changes an ODT entry WITHOUT
+// changing what the object is. Every other writer -- Populate, Populate-Fast,
+// Destroy -- bumps the generation, which kills every outstanding capability.
+// That is right for them: they change Base, Length or existence, so the object
+// really has become a different object.
+//
+// Policy is not identity. Narrowing who may bind an object must NOT invalidate
+// the capabilities already held by those still entitled to it -- otherwise
+// declaring a sharing rule destroys the sharing it describes. DESIGN_02 records
+// exactly this gap: there is no way to set a per-object policy bit without
+// collateral damage, which is why both copy-on-write and per-object bind
+// authority have been blocked on it.
+//
+// DELIBERATELY NARROW. This is not a general "write any ODT field" instruction,
+// and it must never become one. Base, Length, generation, valid and retired stay
+// unreachable from here: those say WHAT the object is, and letting software edit
+// them would turn the ODT into an ordinary table with a security story bolted on.
+// The line is: identity changes cost a generation bump, policy changes do not.
+union clause instruction = VEDA_ODT_SET_DOMAIN : (regidx, regidx, regidx)
+
+mapping clause encdec = VEDA_ODT_SET_DOMAIN(rs2, rs1, rd)
+  <-> 0b0000110 @ encdec_reg(rs2) @ encdec_reg(rs1) @ 0b001 @ encdec_reg(rd) @ 0b0001011
+  when currentlyEnabled(Ext_Veda) & xlen == 64
+
+function clause execute VEDA_ODT_SET_DOMAIN(rs2, rs1, rd) = {
+  if not(cur_privilege == Machine | veda_oda_authorized()) then Illegal_Instruction()
+  else {
+    let object_id_gpr64 : bits(64) = zero_extend(X(rs1));
+    let object_id : bits(44) = object_id_gpr64[43..0];
+    let domain_gpr64 : bits(64) = zero_extend(X(rs2));
+    let new_domain : bits(20) = domain_gpr64[19..0];
+    let old_entry = odt_lookup(object_id);
+    // Refuse on a slot that holds nothing: a policy on a non-existent object is
+    // meaningless, and allowing it would let software pre-stage rules on slots
+    // it does not own yet, to take effect when someone else populates them.
+    if not(old_entry.valid) then Illegal_Instruction()
+    else {
+      odt_write(object_id, struct {
+        // EVERYTHING except owner_domain is copied verbatim. In particular the
+        // generation is NOT bumped -- that is the entire purpose of this
+        // instruction, and the one line that must never be "tidied up".
+        valid      = old_entry.valid,
+        Base       = old_entry.Base,
+        Length     = old_entry.Length,
+        Perms      = old_entry.Perms,
+        generation = old_entry.generation,
+        owner_hart = old_entry.owner_hart,
+        retired    = old_entry.retired,
+        resident   = old_entry.resident,
+        owner_domain = new_domain,
+      });
+      X(rd) = zeros();
+      RETIRE_SUCCESS
+    }
+  }
+}
+
+mapping clause assembly = VEDA_ODT_SET_DOMAIN(rs2, rs1, rd)
+  <-> "veda.odt.set.domain" ^ spc() ^ reg_name(rd) ^ sep() ^ reg_name(rs1) ^ sep() ^ reg_name(rs2)
 
 union clause instruction = VEDA_ODT_PAGE_OUT : (regidx, regidx)
 
@@ -801,6 +866,7 @@ function clause execute VEDA_ODT_PAGE_OUT(rs1, rd) = {
         owner_hart = old_entry.owner_hart,
         retired    = old_entry.retired,
         resident   = false,
+        owner_domain = old_entry.owner_domain,
       });
       X(rd) = zeros();
       RETIRE_SUCCESS
@@ -875,6 +941,7 @@ function clause execute VEDA_ODT_PAGE_IN(rs2, rs1, rd) = {
         owner_hart = old_entry.owner_hart,
         retired    = old_entry.retired,
         resident   = true,              // CHANGED: contents are back
+        owner_domain = old_entry.owner_domain,
       });
       X(rd) = zeros();
       RETIRE_SUCCESS
