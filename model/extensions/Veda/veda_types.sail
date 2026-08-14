@@ -344,6 +344,13 @@ struct odt_entry = {
   // proved why that order matters: a rule applied by default broke the
   // return path and made compartments one-way.
   owner_domain : bits(20),
+  // DESIGN_02 Mechanism 2 -- copy-on-write. The second POLICY field, and it
+  // follows the same rule the first established: setting it must not bump the
+  // generation, because marking an object copy-on-write is not making it a
+  // different object. If it did bump, fork() would kill every capability held
+  // by both parent and child at the moment it tried to share them -- which is
+  // the exact trap the policy write path was built to escape.
+  cow        : bool,
 }
 
 let empty_odt_entry : odt_entry = struct {
@@ -365,6 +372,7 @@ let empty_odt_entry : odt_entry = struct {
   // field cannot express, so it is left for its own increment rather than
   // half-built here.
   owner_domain = VEDA_DOMAIN_ANY,
+  cow = false,
 }
 
 // DESIGN_08 -- the Object-namespace scale decision. A Region Table (RT)

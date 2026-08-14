@@ -111,6 +111,18 @@ let VEDA_CAUSE_RESIDENCY_FAULT : bits(5) = 0b01010 // 0x0A
 // to page something in. This one asks for nothing, because the caller was never
 // entitled to the object at all.
 let VEDA_CAUSE_DOMAIN_VIOLATION : bits(5) = 0b01011 // 0x0B
+// A store reached a copy-on-write object. ITS OWN CAUSE, and this is a
+// deliberate departure from DESIGN_02, which proposed reusing the store-permission
+// violation (0x13).
+//
+// The handler has to tell two situations apart: "this program has a real bug,
+// it may not write here" and "this is copy-on-write, make a private copy and
+// retry". They demand opposite responses. Reusing 0x13 collapses them, and
+// there is no instruction that reads an ODT entry, so the handler cannot even
+// inspect the cow bit to disambiguate. It would end up turning every genuine
+// permission fault into a silent private copy -- converting a security fault
+// into a performance feature. Same argument that gave residency its own cause.
+let VEDA_CAUSE_COW_FAULT : bits(5) = 0b01100 // 0x0C
 
 function veda_xtval(cap_idx : bits(4), cause : bits(5)) -> xlenbits = {
   // Deliberately avoids the two-argument `zero_extend(bits, width)` form --
@@ -216,6 +228,7 @@ function clause execute VEDA_BINDINST(mode_bits, rs1, rd) = {
     resident   = e.resident,
     // Claiming an object for this hart must not alter its POLICY.
     owner_domain = e.owner_domain,
+    cow = e.cow,
   };
 
   // DESIGN_02 -- OBJECT residency gate. Guarded on `e.valid` so the
@@ -287,7 +300,12 @@ function clause execute VEDA_BINDINST(mode_bits, rs1, rd) = {
           Base       = e.Base,
           Length     = e.Length,
           Offset     = cur.Offset, // preserved across relocation, Section 4
-          Perms      = e.Perms,
+          // DESIGN_02's own correction: a capability handed out with store
+          // stripped is only ADVISORY, because the holder can re-Bind the name
+          // and get a fresh, fully-permissioned one. So the attenuation has to
+          // happen HERE, where the entry is the authority and no re-derivation
+          // can escape it.
+          Perms      = veda_bind_perms(e),
           otype      = UNSEALED_OTYPE,
           generation = e.generation,  // now same width (24) -- no bridge needed
           flags      = zeros(),
@@ -315,7 +333,12 @@ function clause execute VEDA_BINDINST(mode_bits, rs1, rd) = {
           Base       = e.Base,
           Length     = e.Length,
           Offset     = zeros(),
-          Perms      = e.Perms,
+          // DESIGN_02's own correction: a capability handed out with store
+          // stripped is only ADVISORY, because the holder can re-Bind the name
+          // and get a fresh, fully-permissioned one. So the attenuation has to
+          // happen HERE, where the entry is the authority and no re-derivation
+          // can escape it.
+          Perms      = veda_bind_perms(e),
           otype      = UNSEALED_OTYPE,
           generation = e.generation,  // now same width (24) -- no bridge needed
           flags      = zeros(),

@@ -67,6 +67,19 @@ function veda_check_access(capidx : vcapno, offset : xlenbits, width : int, need
   else if not(entry.valid) | entry.generation != cap.generation then Err(veda_trap(vcapno_to_vcapidx(capidx), VEDA_CAUSE_TAG_VIOLATION))
   else if isSealedCap(cap) then Err(veda_trap(vcapno_to_vcapidx(capidx), VEDA_CAUSE_SEAL_VIOLATION))
   else if need_load & not(permBit(cap.Perms, PERM_LOAD)) then Err(veda_trap(vcapno_to_vcapidx(capidx), VEDA_CAUSE_PERM_LOAD_VIOLATION))
+  // COPY-ON-WRITE, checked BEFORE the permission test and read from the ENTRY,
+  // not from the capability. Both details are load-bearing.
+  //
+  // From the entry, because set.cow deliberately does not bump the generation,
+  // so capabilities minted BEFORE an object became copy-on-write are still
+  // live and still carry store permission. If this test read the capability it
+  // would miss exactly those -- the parent's own capability at the moment of
+  // fork, which is the first one that will be written.
+  //
+  // Before the permission test, so a copy-on-write object reports "copy me",
+  // never "you may not write". A handler that received 0x13 here could not
+  // tell the two apart and would have to guess.
+  else if need_store & entry.cow then Err(veda_trap(vcapno_to_vcapidx(capidx), VEDA_CAUSE_COW_FAULT))
   else if need_store & not(permBit(cap.Perms, PERM_STORE)) then Err(veda_trap(vcapno_to_vcapidx(capidx), VEDA_CAUSE_PERM_STORE_VIOLATION))
   else if unsigned(offset) + width > unsigned(cap.Length) then Err(veda_trap(vcapno_to_vcapidx(capidx), VEDA_CAUSE_BOUNDS_VIOLATION))
   // DESIGN_02 -- OBJECT residency, checked HERE and not only at Bind. This
@@ -294,6 +307,11 @@ function veda_check_nmc_access(capidx : vcapno, width : int) -> result(physaddr,
   // reaching software from memory is a load and a value reaching memory is a
   // store, whatever single instruction performs them.
   else if not(permBit(cap.Perms, PERM_LOAD)) then Err(veda_trap(vcapno_to_vcapidx(capidx), VEDA_CAUSE_PERM_LOAD_VIOLATION))
+  // NMC_ADD writes memory, so copy-on-write must catch it here too. R15 found
+  // this same path missing the store permission entirely, one increment ago;
+  // the question that finds it is "where is memory WRITTEN", never "where is
+  // the cow bit already read".
+  else if entry.cow then Err(veda_trap(vcapno_to_vcapidx(capidx), VEDA_CAUSE_COW_FAULT))
   else if not(permBit(cap.Perms, PERM_STORE)) then Err(veda_trap(vcapno_to_vcapidx(capidx), VEDA_CAUSE_PERM_STORE_VIOLATION))
   else if unsigned(offset) + width > unsigned(cap.Length) then Err(veda_trap(vcapno_to_vcapidx(capidx), VEDA_CAUSE_BOUNDS_VIOLATION))
   // DESIGN_02 -- OBJECT residency, checked HERE and not only at Bind. This
@@ -529,6 +547,7 @@ function clause execute VEDA_ODT_POPULATE(rs2, rs1, rd) = {
         // forever, which is why this is spelled out rather than inherited.
         resident   = true,
         owner_domain = old_entry.owner_domain,
+        cow = old_entry.cow,
       });
       X(rd) = zeros();
       RETIRE_SUCCESS
@@ -588,6 +607,7 @@ function clause execute VEDA_ODT_DESTROY(rs1, rd) = {
       // no path can ever read a stale `resident = true` off a dead slot.
       resident   = false,
       owner_domain = VEDA_DOMAIN_ANY,
+      cow = false,
     });
     X(rd) = zeros();
     RETIRE_SUCCESS
@@ -697,6 +717,7 @@ function clause execute VEDA_ODT_POPULATE_FAST(rs2, rs1, rd) = {
         // forever, which is why this is spelled out rather than inherited.
         resident   = true,
         owner_domain = VEDA_DOMAIN_ANY,
+        cow = false,
       });
       X(rd) = zeros();
       RETIRE_SUCCESS
@@ -756,6 +777,55 @@ mapping clause assembly = VEDA_ODT_POPULATE_FAST(rs2, rs1, rd)
 // unreachable from here: those say WHAT the object is, and letting software edit
 // them would turn the ODT into an ordinary table with a security story bolted on.
 // The line is: identity changes cost a generation bump, policy changes do not.
+// veda.odt.set.cow -- the second POLICY field, same contract as the first:
+// it writes one field and does not bump the generation.
+//
+// A SEPARATE INSTRUCTION rather than a field selector on set.domain, and that
+// is a hardware-first choice. A selector would let SOFTWARE name which field to
+// write, so the set of writable fields would live in a register; separate
+// instructions keep it fixed in the decoder, where software cannot reach it.
+// The funct7 space in this family is nearly empty, so there is no encoding
+// pressure pushing the other way.
+union clause instruction = VEDA_ODT_SET_COW : (regidx, regidx, regidx)
+
+mapping clause encdec = VEDA_ODT_SET_COW(rs2, rs1, rd)
+  <-> 0b0000111 @ encdec_reg(rs2) @ encdec_reg(rs1) @ 0b001 @ encdec_reg(rd) @ 0b0001011
+  when currentlyEnabled(Ext_Veda) & xlen == 64
+
+function clause execute VEDA_ODT_SET_COW(rs2, rs1, rd) = {
+  if not(cur_privilege == Machine | veda_oda_authorized()) then Illegal_Instruction()
+  else {
+    let object_id_gpr64 : bits(64) = zero_extend(X(rs1));
+    let object_id : bits(44) = object_id_gpr64[43..0];
+    let flag_gpr64 : bits(64) = zero_extend(X(rs2));
+    let new_cow : bool = flag_gpr64[0] == bitone;
+    let old_entry = odt_lookup(object_id);
+    if not(old_entry.valid) then Illegal_Instruction()
+    else {
+      odt_write(object_id, struct {
+        valid      = old_entry.valid,
+        Base       = old_entry.Base,
+        Length     = old_entry.Length,
+        Perms      = old_entry.Perms,
+        // NOT bumped. fork() marks the parent's objects copy-on-write while
+        // both parent and child hold live capabilities to them; bumping here
+        // would kill exactly those, at exactly the moment they are needed.
+        generation = old_entry.generation,
+        owner_hart = old_entry.owner_hart,
+        retired    = old_entry.retired,
+        resident   = old_entry.resident,
+        owner_domain = old_entry.owner_domain,
+        cow        = new_cow,
+      });
+      X(rd) = zeros();
+      RETIRE_SUCCESS
+    }
+  }
+}
+
+mapping clause assembly = VEDA_ODT_SET_COW(rs2, rs1, rd)
+  <-> "veda.odt.set.cow" ^ spc() ^ reg_name(rd) ^ sep() ^ reg_name(rs1) ^ sep() ^ reg_name(rs2)
+
 union clause instruction = VEDA_ODT_SET_DOMAIN : (regidx, regidx, regidx)
 
 mapping clause encdec = VEDA_ODT_SET_DOMAIN(rs2, rs1, rd)
@@ -788,6 +858,7 @@ function clause execute VEDA_ODT_SET_DOMAIN(rs2, rs1, rd) = {
         retired    = old_entry.retired,
         resident   = old_entry.resident,
         owner_domain = new_domain,
+        cow = old_entry.cow,
       });
       X(rd) = zeros();
       RETIRE_SUCCESS
@@ -867,6 +938,7 @@ function clause execute VEDA_ODT_PAGE_OUT(rs1, rd) = {
         retired    = old_entry.retired,
         resident   = false,
         owner_domain = old_entry.owner_domain,
+        cow = old_entry.cow,
       });
       X(rd) = zeros();
       RETIRE_SUCCESS
@@ -942,6 +1014,7 @@ function clause execute VEDA_ODT_PAGE_IN(rs2, rs1, rd) = {
         retired    = old_entry.retired,
         resident   = true,              // CHANGED: contents are back
         owner_domain = old_entry.owner_domain,
+        cow = old_entry.cow,
       });
       X(rd) = zeros();
       RETIRE_SUCCESS
