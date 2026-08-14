@@ -107,6 +107,30 @@ mapping encdec_veda_capquery : veda_capquery <-> bits(7) = {
   VEDA_CGETTYPE   <-> 0b0000100,
   VEDA_CGETADDR   <-> 0b0000101,
   VEDA_CGETOFFSET <-> 0b0000110,
+  // THE FAULT-IDENTIFICATION CHANNEL. A trap reports {cap_idx, cause} and no
+  // Object_ID, and until now nothing could recover one: the query family read
+  // every field of a capability EXCEPT its name. So a fault handler was told
+  // "capability register N faulted" and could not learn which OBJECT that was
+  // -- which is why the copy-on-write handler could not mint the copy, and why
+  // DESIGN_02 lists this as needing resolution before `backing` is designed.
+  //
+  // DISCLOSING THE NAME IS SAFE, and that is established rather than assumed.
+  // DESIGN_08 draws the confidentiality line around the physical base, which
+  // "must never be exposed to software", explicitly not around the name.
+  // Software already puts arbitrary 44-bit names in a GPR to call veda.bind,
+  // and CGetBase already returns a raw physical Base -- strictly more sensitive
+  // than this. Isolation here rests on capability non-possession, not on name
+  // secrecy.
+  //
+  // STALENESS RULE, and it must be documented rather than discovered: this
+  // reads the capability register with NO generation check, exactly like every
+  // other query. A STALE capability therefore returns a real, currently
+  // allocated name belonging to a DIFFERENT incarnation of that slot. Callers
+  // must treat the name as only as fresh as the tag. Fault handlers are safe by
+  // construction -- a capability that reached a COW or permission fault has
+  // already passed the tag and generation checks -- but a handler that stores
+  // the name and uses it later has not.
+  VEDA_CGETOBJECTID <-> 0b0000111,
 }
 
 union clause instruction = VEDA_CAPQUERY : (veda_capquery, vcapidx, regidx)
@@ -129,6 +153,11 @@ function clause execute VEDA_CAPQUERY(q, rs1, rd) = {
     VEDA_CGETTYPE   => zero_extend(cap.otype),
     VEDA_CGETADDR   => veda_to_xlen(zero_extend(cap.Base) + zero_extend(cap.Offset)),
     VEDA_CGETOFFSET => veda_to_xlen(zero_extend(cap.Offset)),
+    // Through the explicit 64-bit domain, like every other wide field here: a
+    // direct zero_extend is not provably in range when xlen might be 32, and
+    // Ext_Veda's RV64-only gate is invisible to the type checker inside an
+    // execute body -- a lesson this file already records elsewhere.
+    VEDA_CGETOBJECTID => veda_to_xlen(zero_extend(cap.Object_ID)),
   };
   X(rd) = result;
   RETIRE_SUCCESS
@@ -142,6 +171,7 @@ mapping veda_capquery_mnemonic : veda_capquery <-> string = {
   VEDA_CGETTYPE   <-> "cgettype",
   VEDA_CGETADDR   <-> "cgetaddr",
   VEDA_CGETOFFSET <-> "cgetoffset",
+  VEDA_CGETOBJECTID <-> "cgetobjectid"
 }
 
 mapping clause assembly = VEDA_CAPQUERY(q, rs1, rd)

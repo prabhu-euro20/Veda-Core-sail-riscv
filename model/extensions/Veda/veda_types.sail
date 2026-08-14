@@ -414,7 +414,7 @@ let empty_region_entry : region_entry = struct {
 enum veda_atomicop = {VEDA_AMOSWAP, VEDA_AMOADD, VEDA_AMOXOR, VEDA_AMOAND, VEDA_AMOOR, VEDA_AMOMIN, VEDA_AMOMAX, VEDA_AMOMINU, VEDA_AMOMAXU}
 
 // Milestone V-B: Veda-Cap query family's selector enum, same reason.
-enum veda_capquery = {VEDA_CGETBASE, VEDA_CGETLEN, VEDA_CGETPERM, VEDA_CGETTAG, VEDA_CGETTYPE, VEDA_CGETADDR, VEDA_CGETOFFSET}
+enum veda_capquery = {VEDA_CGETBASE, VEDA_CGETLEN, VEDA_CGETPERM, VEDA_CGETTAG, VEDA_CGETTYPE, VEDA_CGETADDR, VEDA_CGETOFFSET, VEDA_CGETOBJECTID}
 
 // Minimal OS kernel Milestone A (MINIMAL_OS_KERNEL_DESIGN.md): OSpecialRW's
 // own SCR-selector enum, same real scattered-ordering reason as above --
