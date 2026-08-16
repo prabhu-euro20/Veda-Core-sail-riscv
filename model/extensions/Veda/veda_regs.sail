@@ -395,9 +395,48 @@ function veda_pcc_restore_on_xret() -> unit = {
 // mutation is restricted -- reading mtvec does not, by itself, grant any
 // new capability or help bypass anything a compartment doesn't already
 // know from its own bounds.
+// ─────────────────────────────────────────────────────────────────────────
+//  R26 -- THE SEVEN AUTHORITY GATES STOP TRUSTING A BOUND.
+//
+//  R26's disease is one specific thing: a security predicate answered by an
+//  IN-BAND value. `veda_pcc_length == VEDA_PCC_UNBOUNDED` was being used to mean
+//  "this code holds machine authority", and Length is a number software chooses:
+//  enter a compartment on a code object whose Length is the sentinel and the
+//  predicate reads true.
+//
+//  The cure this codebase already knows is an OUT-OF-BAND identity, and it
+//  already built one. VEDA_OBJECT_NONE has region field 0xFFFFF, and
+//  veda_region_rt_resident returns false for any region beyond the modeled
+//  window -- so a capability naming NONE cannot cross EITHER domain crossing,
+//  however it was obtained, including forged through memory. Both crossings
+//  check RT residency before any commit. The "nothing here" value is
+//  structurally unreachable, which is exactly the discipline Length lacks.
+//
+//  ADDED, NEVER SUBSTITUTED. Every failure found while attacking the
+//  alternatives came from REPLACING the length test: the R12 poison path relies
+//  on veda_pcc_length == 0 to fault the very next fetch, and a handler that
+//  narrowed itself by csrw 0x7C0/0x7C1 still names no object. Monotone addition
+//  keeps all of that. Given three recorded "applied to four of five arms"
+//  failures in this project, monotonicity is a safety property of the EDIT, not
+//  only of the semantics -- a missed site stays unfixed, it never becomes a new
+//  hole.
+//
+//  DELIBERATELY NOT TOUCHED, and named so nobody "completes" the edit later:
+//  fetch bounding (step_ext.sail) and the purecap data hook both ask a BOUNDS
+//  question, not an authority question. For an object whose Length genuinely is
+//  0xFFFFFFFFFF, "fetch anywhere" is the correct answer and not a forged one.
+//  Converting them would be new policy, would break every sentinel compartment
+//  that reaches its halt macro, and in the fetch case would swap a skipped check
+//  for a vacuous 2^40 window. The real questions behind those two are "who may
+//  mint an unbounded code object" and task #20.
+//
+//  And veda_bind_domain_ok was never a victim -- it ALREADY tests
+//  veda_pcc_object == VEDA_OBJECT_NONE. It is the shipped, mutation-tested
+//  precedent this change generalises.
+// ─────────────────────────────────────────────────────────────────────────
 function veda_allows_CSR_access(csr : csreg, priv : Privilege, access_type : CSRAccessType) -> bool =
   match csr {
-    0x305 => (access_type == CSRRead) | (veda_pcc_length == VEDA_PCC_UNBOUNDED),
+    0x305 => (access_type == CSRRead) | ((veda_pcc_length == VEDA_PCC_UNBOUNDED) & (veda_pcc_object == VEDA_OBJECT_NONE)),
     _     => true,
   }
 
@@ -558,22 +597,22 @@ function clause read_CSR(0x7C5) = zero_extend(veda_mode)
 // (vc_timer_intr_pcc_reset.S) writes 0x7C3 inside a trap handler, which runs in
 // Machine mode, and its mstatus use is MIE, not a privilege drop.
 function clause write_CSR(0x7C0, value) = {
-  if veda_pcc_length != VEDA_PCC_UNBOUNDED then { Err(()) }
+  if (veda_pcc_length != VEDA_PCC_UNBOUNDED) | (veda_pcc_object != VEDA_OBJECT_NONE) then { Err(()) }
   else { if cur_privilege == Machine then { let v64 : bits(64) = zero_extend(value); veda_pcc_base = v64[55..0] };
          Ok(veda_to_xlen(zero_extend(veda_pcc_base))) }
 }
 function clause write_CSR(0x7C1, value) = {
-  if veda_pcc_length != VEDA_PCC_UNBOUNDED then { Err(()) }
+  if (veda_pcc_length != VEDA_PCC_UNBOUNDED) | (veda_pcc_object != VEDA_OBJECT_NONE) then { Err(()) }
   else { if cur_privilege == Machine then { let v64 : bits(64) = zero_extend(value); veda_pcc_length = v64[39..0] };
          Ok(veda_to_xlen(zero_extend(veda_pcc_length))) }
 }
 function clause write_CSR(0x7C2, value) = {
-  if veda_pcc_length != VEDA_PCC_UNBOUNDED then { Err(()) }
+  if (veda_pcc_length != VEDA_PCC_UNBOUNDED) | (veda_pcc_object != VEDA_OBJECT_NONE) then { Err(()) }
   else { if cur_privilege == Machine then { let v64 : bits(64) = zero_extend(value); veda_mepcc_base = v64[55..0] };
          Ok(veda_to_xlen(zero_extend(veda_mepcc_base))) }
 }
 function clause write_CSR(0x7C3, value) = {
-  if veda_pcc_length != VEDA_PCC_UNBOUNDED then { Err(()) }
+  if (veda_pcc_length != VEDA_PCC_UNBOUNDED) | (veda_pcc_object != VEDA_OBJECT_NONE) then { Err(()) }
   else { if cur_privilege == Machine then { let v64 : bits(64) = zero_extend(value); veda_mepcc_length = v64[39..0] };
          Ok(veda_to_xlen(zero_extend(veda_mepcc_length))) }
 }
@@ -599,7 +638,7 @@ function clause write_CSR(0x7C4, value) = { veda_attr = zero_extend(value); Ok(v
 // disable Milestone 19's own purecap enforcement out from under itself.
 // Gated identically.
 function clause write_CSR(0x7C5, value) = {
-  if veda_pcc_length != VEDA_PCC_UNBOUNDED then { Err(()) }
+  if (veda_pcc_length != VEDA_PCC_UNBOUNDED) | (veda_pcc_object != VEDA_OBJECT_NONE) then { Err(()) }
   else {
     if cur_privilege == Machine then veda_mode = zero_extend(value[0..0]);
     Ok(zero_extend(veda_mode))
@@ -865,7 +904,7 @@ function veda_object_is_executing(object_id : bits(44)) -> bool =
   | (veda_trap_depth != zeros() & object_id == veda_mepcc_object)
 
 function veda_trap_level_has_context() -> bool =
-  veda_pcc_length != VEDA_PCC_UNBOUNDED | veda_current_region != zeros()
+  veda_pcc_length != VEDA_PCC_UNBOUNDED | veda_current_region != zeros() | veda_pcc_object != VEDA_OBJECT_NONE
 
 function veda_crbr_save_and_reset() -> unit = {
   if veda_current_region != zeros() then {
