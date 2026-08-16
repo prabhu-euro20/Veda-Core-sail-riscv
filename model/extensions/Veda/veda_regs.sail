@@ -528,21 +528,54 @@ function clause read_CSR(0x7C5) = zero_extend(veda_mode)
 // OR M-mode, Milestone 11), so a compartment rewriting `veda_attr` alone
 // cannot use it for anything without separately satisfying that
 // unrelated check -- considered and correctly excluded, not overlooked.
+// R27 -- the PRIVILEGE half, applied to the four CSRs that were missing it.
+//
+// Milestone 20 gated five compartment-state CSRs together, for one reason: a
+// compartment must not be able to rewrite its own execution bounds or forge its
+// own trap return. But only ONE of the five -- 0x7C5, veda_mode -- ever received
+// the `cur_privilege == Machine` half. The four that let software rewrite PCC
+// and MEPCC directly got the PCC-bounds half alone.
+//
+// That asymmetry is backwards. 0x7C5 toggles whether ordinary loads and stores
+// are checked; 0x7C0-0x7C3 rewrite the bounds of the code that is CURRENTLY
+// EXECUTING and the return path a trap will take. The weaker gate is on the
+// stronger authority.
+//
+// It is also what turns R26 from a partial escape into a complete one. R26
+// records that six security gates infer "not in a compartment" by testing
+// veda_pcc_length against VEDA_PCC_UNBOUNDED, and that the test is forgeable by
+// entering a compartment on a sentinel-Length object. Once forged, THESE FOUR
+// CSRs are what let the compartment widen its own PCC and fetch anywhere. This
+// arm does not close R26 -- only explicit compartment state does that -- but it
+// means forging the predicate is no longer sufficient on its own: an
+// unprivileged compartment still cannot use the CSRs the forgery unlocks.
+// Defence in depth, deliberately, while R26 proper is designed.
+//
+// Silent no-op on a non-Machine write, matching 0x7C5's shape exactly: the
+// register holds, nothing traps, and the read-back returns the unchanged value.
+// Verified before writing: no test in either corpus writes 0x7C0-0x7C3 from
+// non-Machine mode. The one file that touches both mstatus and these CSRs
+// (vc_timer_intr_pcc_reset.S) writes 0x7C3 inside a trap handler, which runs in
+// Machine mode, and its mstatus use is MIE, not a privilege drop.
 function clause write_CSR(0x7C0, value) = {
   if veda_pcc_length != VEDA_PCC_UNBOUNDED then { Err(()) }
-  else { let v64 : bits(64) = zero_extend(value); veda_pcc_base = v64[55..0]; Ok(veda_to_xlen(zero_extend(veda_pcc_base))) }
+  else { if cur_privilege == Machine then { let v64 : bits(64) = zero_extend(value); veda_pcc_base = v64[55..0] };
+         Ok(veda_to_xlen(zero_extend(veda_pcc_base))) }
 }
 function clause write_CSR(0x7C1, value) = {
   if veda_pcc_length != VEDA_PCC_UNBOUNDED then { Err(()) }
-  else { let v64 : bits(64) = zero_extend(value); veda_pcc_length = v64[39..0]; Ok(veda_to_xlen(zero_extend(veda_pcc_length))) }
+  else { if cur_privilege == Machine then { let v64 : bits(64) = zero_extend(value); veda_pcc_length = v64[39..0] };
+         Ok(veda_to_xlen(zero_extend(veda_pcc_length))) }
 }
 function clause write_CSR(0x7C2, value) = {
   if veda_pcc_length != VEDA_PCC_UNBOUNDED then { Err(()) }
-  else { let v64 : bits(64) = zero_extend(value); veda_mepcc_base = v64[55..0]; Ok(veda_to_xlen(zero_extend(veda_mepcc_base))) }
+  else { if cur_privilege == Machine then { let v64 : bits(64) = zero_extend(value); veda_mepcc_base = v64[55..0] };
+         Ok(veda_to_xlen(zero_extend(veda_mepcc_base))) }
 }
 function clause write_CSR(0x7C3, value) = {
   if veda_pcc_length != VEDA_PCC_UNBOUNDED then { Err(()) }
-  else { let v64 : bits(64) = zero_extend(value); veda_mepcc_length = v64[39..0]; Ok(veda_to_xlen(zero_extend(veda_mepcc_length))) }
+  else { if cur_privilege == Machine then { let v64 : bits(64) = zero_extend(value); veda_mepcc_length = v64[39..0] };
+         Ok(veda_to_xlen(zero_extend(veda_mepcc_length))) }
 }
 function clause write_CSR(0x7C4, value) = { veda_attr = zero_extend(value); Ok(veda_to_xlen(veda_attr)) }
 // Milestone 19: M-mode-write-gated, explicitly, inside this clause --
