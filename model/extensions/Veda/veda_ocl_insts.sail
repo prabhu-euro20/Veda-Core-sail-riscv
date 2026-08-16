@@ -60,27 +60,48 @@ mapping clause encdec = VEDA_OCS(rs2, rs1, rd)
 // (or the entry no longer being `valid` at all, i.e. the object was
 // destroyed and not yet replaced) is treated as a Tag Violation, matching
 // the spec's own words exactly ("mismatch -> Tag Violation", Section 5.1).
-function veda_check_access(capidx : vcapno, offset : xlenbits, width : int, need_load : bool, need_store : bool) -> result(physaddr, ExecutionResult) = {
+function veda_check_access(capidx : vcapno, offset : xlenbits, width : int, need_load : bool, need_store : bool, check_align : bool) -> result(physaddr, ExecutionResult) = {
   let cap = C(capidx);
   let entry = odt_lookup(cap.Object_ID);
+  // R19 increment 1: hoisted out of the Ok branch, because the alignment arm
+  // below now lives INSIDE this chain and needs the resolved address. It reads
+  // only cap.Base and offset, both available before the entry is consulted, so
+  // hoisting introduces no ordering hazard. Phase 1 increment 2: Base is 56
+  // bits, so the sum is computed in an explicit 64-bit domain and narrowed once
+  // via veda_to_xlen (DESIGN_01 decision 7: Ext_Veda is RV64-only, and the
+  // encdec's own xlen==64 guard is deliberately not visible to the type checker
+  // inside an execute body).
+  let real_loc64 : bits(64) = zero_extend(cap.Base) + zero_extend(offset);
   if not(CTag(capidx)) then Err(veda_trap(vcapno_to_vcapidx(capidx), VEDA_CAUSE_TAG_VIOLATION))
   else if not(entry.valid) | entry.generation != cap.generation then Err(veda_trap(vcapno_to_vcapidx(capidx), VEDA_CAUSE_TAG_VIOLATION))
   else if isSealedCap(cap) then Err(veda_trap(vcapno_to_vcapidx(capidx), VEDA_CAUSE_SEAL_VIOLATION))
   else if need_load & not(permBit(cap.Perms, PERM_LOAD)) then Err(veda_trap(vcapno_to_vcapidx(capidx), VEDA_CAUSE_PERM_LOAD_VIOLATION))
-  // COPY-ON-WRITE, checked BEFORE the permission test and read from the ENTRY,
-  // not from the capability. Both details are load-bearing.
+  // R19 increment 1 -- the store-permission arm is GATED on not-cow, and that
+  // gate is what lets the copy-on-write arm move to the BOTTOM of this chain.
   //
-  // From the entry, because set.cow deliberately does not bump the generation,
-  // so capabilities minted BEFORE an object became copy-on-write are still
-  // live and still carry store permission. If this test read the capability it
-  // would miss exactly those -- the parent's own capability at the moment of
-  // fork, which is the first one that will be written.
+  // Why the gate is load-bearing and cannot simply be dropped: veda_bind_perms
+  // masks a cow object's Perms with 0xFFF7, clearing PERM_STORE (bit 3) and
+  // leaving PERM_LOAD (bit 2). So a capability freshly bound to a cow object
+  // lacks store permission BY CONSTRUCTION. Without this gate, moving the cow
+  // arm below this one would make every fork-triggered write report "you may
+  // not write" instead of "copy me", and copy-on-write would never fire at all.
+  // The property the previous ordering bought -- a cow object reports 0x0C and
+  // never 0x13 -- is preserved exactly, by the gate rather than by precedence.
   //
-  // Before the permission test, so a copy-on-write object reports "copy me",
-  // never "you may not write". A handler that received 0x13 here could not
-  // tell the two apart and would have to guess.
-  else if need_store & entry.cow then Err(veda_trap(vcapno_to_vcapidx(capidx), VEDA_CAUSE_COW_FAULT))
-  else if need_store & not(permBit(cap.Perms, PERM_STORE)) then Err(veda_trap(vcapno_to_vcapidx(capidx), VEDA_CAUSE_PERM_STORE_VIOLATION))
+  // NOTE the premise recorded earlier in this file was too strong: it is not
+  // true that EVERY capability to a cow object lacks store. The parent's
+  // pre-cow capability retains it (set.cow deliberately does not bump the
+  // generation -- that is the fork case), and both are handled here: the parent
+  // skips this arm because it HAS store, the child skips it because of the gate.
+  else if need_store & not(permBit(cap.Perms, PERM_STORE)) & not(entry.cow) then Err(veda_trap(vcapno_to_vcapidx(capidx), VEDA_CAUSE_PERM_STORE_VIOLATION))
+  // R19 increment 1 -- 32-byte alignment moved HERE from the OCL.C / OCS.C
+  // callers, where it ran AFTER this whole chain returned Ok. Left there, a
+  // misaligned store to a cow object would report 0x0C in Sail and 0x08 in the
+  // RTL (whose alignment has always been an arm inside the cause chain) -- a
+  // divergence created on a state where the two layers agree today. Hoisting
+  // also closes two pre-existing divergences nobody had noticed: misaligned +
+  // out-of-bounds, and misaligned + non-resident.
+  else if check_align & (real_loc64[4 .. 0] != zeros()) then Err(veda_trap(vcapno_to_vcapidx(capidx), VEDA_CAUSE_CAP_MISALIGNED))
   else if unsigned(offset) + width > unsigned(cap.Length) then Err(veda_trap(vcapno_to_vcapidx(capidx), VEDA_CAUSE_BOUNDS_VIOLATION))
   // DESIGN_02 -- OBJECT residency, checked HERE and not only at Bind. This
   // term closes a real hole, and it is free: `entry` is already read above,
@@ -112,15 +133,39 @@ function veda_check_access(capidx : vcapno, offset : xlenbits, width : int, need
   // have SUCCEEDED. That is exactly what a resumable pager fault should
   // mean -- page the object in, re-execute, proceed.
   else if not(entry.resident) then Err(veda_trap(vcapno_to_vcapidx(capidx), VEDA_CAUSE_RESIDENCY_FAULT))
+  // R19 increment 1 -- COPY-ON-WRITE, now LAST, and still read from the ENTRY.
+  //
+  // From the entry because set.cow deliberately does not bump the generation,
+  // so capabilities minted BEFORE an object became copy-on-write are still live
+  // and still carry store permission. A test reading the CAPABILITY would miss
+  // exactly those -- the parent's own capability at the moment of fork, the
+  // first one that will be written.
+  //
+  // LAST because 0x0C is not a refusal, it is a REPAIR REQUEST: it instructs a
+  // handler to allocate, copy, and hand back a fresh writable object. Raising
+  // it for an access that was going to be refused anyway arms that work for
+  // nothing. This chain's own residency arm already states the rule -- a repair
+  // fault is raised "only for an access that would otherwise have SUCCEEDED" --
+  // and the cow arm violated it from the day it landed.
+  //
+  // BELOW residency specifically, because you cannot copy an object that is not
+  // in memory: the handler would dereference a Base whose frame the pager may
+  // already have reassigned. Residency is repaired first, and the retry then
+  // raises 0x0C.
+  //
+  // The one amplification this genuinely closes: veda_setbounds with rs2 = 0
+  // constructs a tagged, unsealed, generation-current capability of Length 0 in
+  // ONE instruction. Under the old order that zero-entitlement capability
+  // stored, reached the cow arm before bounds was ever consulted, took 0x0C,
+  // and the handler rebound it to a FULL-Length capability minted from the
+  // entry. Under this order every offset is out of bounds, so it can never arm
+  // a split. Note this is NOT "closing rights amplification" in general -- a
+  // principal that can trigger 0x0C out of bounds can trigger it at offset 0
+  // and get the same private copy. The rest is ordering hygiene and resource
+  // containment, and it should be described as such.
+  else if need_store & entry.cow then Err(veda_trap(vcapno_to_vcapidx(capidx), VEDA_CAUSE_COW_FAULT))
   else {
-    // Phase 1 increment 2: Base is now 56 bits, so zero-extending it
-    // straight into xlenbits is ill-typed whenever xlen could be 32. The
-    // sum is computed in an explicit 64-bit domain and narrowed once via
-    // veda_to_xlen (DESIGN_01 decision 7: Ext_Veda is RV64-only, and the
-    // encdec's own xlen==64 guard is deliberately not visible to the type
-    // checker inside an execute body -- a lesson already recorded in this
-    // file for VEDA_NMC_ADD_D).
-    let real_loc64 : bits(64) = zero_extend(cap.Base) + zero_extend(offset);
+    // real_loc64 is computed at the top of this function -- see the hoist there.
     let real_loc : xlenbits = veda_to_xlen(real_loc64);
     Ok(Physaddr(zero_extend(real_loc)))
   }
@@ -129,7 +174,7 @@ function veda_check_access(capidx : vcapno, offset : xlenbits, width : int, need
 function clause execute VEDA_OCL(rs2, rs1, rd) = {
   let capidx = vcapidx_to_vcapno(rs1);
   let offset : xlenbits = X(rs2);
-  match veda_check_access(capidx, offset, xlen_bytes, true, false) {
+  match veda_check_access(capidx, offset, xlen_bytes, true, false, false) {
     Err(res) => res,
     Ok(paddr) => {
       let (data, _) : (xlenbits, mem_meta) = read_ram(Read_plain, paddr, xlen_bytes, false);
@@ -142,7 +187,7 @@ function clause execute VEDA_OCL(rs2, rs1, rd) = {
 function clause execute VEDA_OCS(rs2, rs1, rd) = {
   let capidx = vcapidx_to_vcapno(rs1);
   let offset : xlenbits = X(rs2);
-  match veda_check_access(capidx, offset, xlen_bytes, false, true) {
+  match veda_check_access(capidx, offset, xlen_bytes, false, true, false) {
     Err(res) => res,
     Ok(paddr) => {
       let data = X(rd);
@@ -185,7 +230,7 @@ mapping clause encdec = VEDA_OCS_C(rs2, rs1, rd)
 function clause execute VEDA_OCL_C(rs2, rs1, rd) = {
   let capidx = vcapidx_to_vcapno(rs1);
   let offset : xlenbits = X(rs2);
-  match veda_check_access(capidx, offset, 32, true, false) {
+  match veda_check_access(capidx, offset, 32, true, false, true) {
     Err(res) => res,
     Ok(paddr) => {
       // 32-byte natural alignment is architectural as of the 256-bit
@@ -194,9 +239,9 @@ function clause execute VEDA_OCL_C(rs2, rs1, rd) = {
       // stored capability while the tag the load checks still reads 1.
       // Checked after the capability's own validity checks, so a bad
       // capability still reports its real reason first.
-      let Physaddr(pa) = paddr;
-      if pa[4 .. 0] != zeros() then veda_trap(rs1, VEDA_CAUSE_CAP_MISALIGNED)
-      else {
+      // R19 increment 1: the 32-byte alignment test moved INTO
+      // veda_check_access, where it is ordered against bounds, residency and
+      // copy-on-write instead of running after the whole chain returned Ok.
       // read_meta = true (unlike OCL.D/OCS.D's `false` above): this is the
       // one real access kind in this file that actually needs the
       // memory-resident Tag, not just the 256 data bits.
@@ -213,7 +258,6 @@ function clause execute VEDA_OCL_C(rs2, rs1, rd) = {
       // property, not assumed true just because the load succeeded.
       CTag(rd) = tag;
       RETIRE_SUCCESS
-      }
     },
   }
 }
@@ -221,7 +265,7 @@ function clause execute VEDA_OCL_C(rs2, rs1, rd) = {
 function clause execute VEDA_OCS_C(rs2, rs1, rd) = {
   let capidx = vcapidx_to_vcapno(rs1);
   let offset : xlenbits = X(rs2);
-  match veda_check_access(capidx, offset, 32, false, true) {
+  match veda_check_access(capidx, offset, 32, false, true, true) {
     Err(res) => res,
     Ok(paddr) => {
       // 32-byte natural alignment is architectural as of the 256-bit
@@ -230,9 +274,9 @@ function clause execute VEDA_OCS_C(rs2, rs1, rd) = {
       // stored capability while the tag the load checks still reads 1.
       // Checked after the capability's own validity checks, so a bad
       // capability still reports its real reason first.
-      let Physaddr(pa) = paddr;
-      if pa[4 .. 0] != zeros() then veda_trap(rs1, VEDA_CAUSE_CAP_MISALIGNED)
-      else {
+      // R19 increment 1: the 32-byte alignment test moved INTO
+      // veda_check_access, where it is ordered against bounds, residency and
+      // copy-on-write instead of running after the whole chain returned Ok.
       let store_cap = C(rd);
       let store_tag = CTag(rd);
       let packed : bits(256) = veda_cap_pack(store_cap);
@@ -244,7 +288,6 @@ function clause execute VEDA_OCS_C(rs2, rs1, rd) = {
       // "not a real capability" for those bytes.
       let _ = write_ram(Write_plain, paddr, 32, packed, store_tag);
       RETIRE_SUCCESS
-      }
     },
   }
 }
@@ -311,8 +354,13 @@ function veda_check_nmc_access(capidx : vcapno, width : int) -> result(physaddr,
   // this same path missing the store permission entirely, one increment ago;
   // the question that finds it is "where is memory WRITTEN", never "where is
   // the cow bit already read".
-  else if entry.cow then Err(veda_trap(vcapno_to_vcapidx(capidx), VEDA_CAUSE_COW_FAULT))
-  else if not(permBit(cap.Perms, PERM_STORE)) then Err(veda_trap(vcapno_to_vcapidx(capidx), VEDA_CAUSE_PERM_STORE_VIOLATION))
+  // R19 increment 1 -- gated exactly as veda_check_access's arm is, and for the
+  // same reason. NOTE these two arms are deliberately NOT textually identical
+  // to that function's: NMC_ADD is unconditionally read-modify-write, so there
+  // is no need_store conjunct here. The two checkers are otherwise kept
+  // textually parallel on purpose so they stay diffable -- this one arm is the
+  // exception, and it is an exception by design, not a transcription error.
+  else if not(permBit(cap.Perms, PERM_STORE)) & not(entry.cow) then Err(veda_trap(vcapno_to_vcapidx(capidx), VEDA_CAUSE_PERM_STORE_VIOLATION))
   else if unsigned(offset) + width > unsigned(cap.Length) then Err(veda_trap(vcapno_to_vcapidx(capidx), VEDA_CAUSE_BOUNDS_VIOLATION))
   // DESIGN_02 -- OBJECT residency, checked HERE and not only at Bind. This
   // term closes a real hole, and it is free: `entry` is already read above,
@@ -344,6 +392,10 @@ function veda_check_nmc_access(capidx : vcapno, width : int) -> result(physaddr,
   // have SUCCEEDED. That is exactly what a resumable pager fault should
   // mean -- page the object in, re-execute, proceed.
   else if not(entry.resident) then Err(veda_trap(vcapno_to_vcapidx(capidx), VEDA_CAUSE_RESIDENCY_FAULT))
+  // R19 increment 1 -- cow moved LAST here too; see veda_check_access for the
+  // full reasoning. Bare, with no need_store conjunct, because NMC_ADD always
+  // writes.
+  else if entry.cow then Err(veda_trap(vcapno_to_vcapidx(capidx), VEDA_CAUSE_COW_FAULT))
   else {
     // Phase 1 increment 2: Base is now 56 bits, so zero-extending it
     // straight into xlenbits is ill-typed whenever xlen could be 32. The

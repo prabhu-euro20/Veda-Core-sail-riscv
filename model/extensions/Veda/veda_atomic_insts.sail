@@ -69,7 +69,7 @@ function clause execute VEDA_ATOMIC(op, _aq, _rl, rs2, rs1, rd) = {
   // execution yet to order against (VEDA_CORE_SPEC.md Section 5's own
   // Integrity Manager deferral notes the identical limitation).
   let capidx = vcapidx_to_vcapno(rs1);
-  match veda_check_access(capidx, veda_to_xlen(zero_extend(C(capidx).Offset)), xlen_bytes, true, true) {
+  match veda_check_access(capidx, veda_to_xlen(zero_extend(C(capidx).Offset)), xlen_bytes, true, true, false) {
     Err(res) => res,
     Ok(paddr) => {
       let (loaded, _) : (xlenbits, mem_meta) = read_ram(Read_plain, paddr, xlen_bytes, false);
