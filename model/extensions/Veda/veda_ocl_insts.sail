@@ -118,17 +118,31 @@ function veda_check_access(capidx : vcapno, offset : xlenbits, width : int, need
   // the entry is the authority and no re-derivation can escape it." Bind's domain
   // gate defaults to VEDA_DOMAIN_ANY, so anyone may re-Bind and re-derive. The
   // 0xFFF7 mask is the only thing a re-Bind cannot escape -- and this arm is what
-  // finally gives that mask something to enforce. Until now the mask did no
-  // enforcement work at all: the cow arm caught every write regardless of Perms,
-  // so the mask's sole observable effect was the value CGetPerm returned.
+  // finally gives that mask something to enforce WHILE THE ENTRY IS COW.
+  //
+  // AN EARLIER DRAFT OF THIS COMMENT SAID THE MASK "DID NO ENFORCEMENT WORK AT
+  // ALL", AND THAT WAS OVERSTATED. An adversarial pass corrected it, and the
+  // correction is worth keeping because two independent readers disagreed about
+  // it and the wrong one was believed first. The old arm read `... & not(entry.
+  // cow)`, so the mask was inert only WHILE cow was set; the moment cow was
+  // cleared the same arm refused a store-stripped capability with 0x13. Every
+  // object that completed a copy-on-write repair was enforced by it. What was
+  // missing was enforcement DURING the cow window -- which is exactly the window
+  // in which the split right has to be decided.
   //
   // WHAT THIS DELIBERATELY CANNOT EXPRESS: "read-only but splittable". If an
   // entry's Perms lack PERM_STORE, no capability to it may ever force a copy.
-  // That is not a loss. A reader who wants a private writable version should
-  // ALLOCATE one and copy through the read capability it already holds -- the
-  // same self-service answer R19 decided for the copier itself. Copy-on-write
-  // exists to DEFER a copy that is already owed, not to manufacture an
-  // entitlement the holder never had.
+  // That is not a loss. A reader who wants a private writable version asks for
+  // one to be allocated and copies into it through the read capability it
+  // already holds -- the same self-service answer R19 decided for the copier
+  // itself. Stated precisely, because an earlier draft said the reader "should
+  // ALLOCATE one" and it cannot: both Populate clauses require
+  // `cur_privilege == Machine | veda_oda_authorized()`, so the allocation is a
+  // request to something that holds that authority. The point stands -- the
+  // request is an explicit one that the allocator may refuse, rather than an
+  // allocation the machine performs on demand for anyone who stores.
+  // Copy-on-write exists to DEFER a copy that is already owed, not to
+  // manufacture an entitlement the holder never had.
   else if need_store & not(permBit(cap.Perms, PERM_STORE)) then Err(veda_trap(vcapno_to_vcapidx(capidx), VEDA_CAUSE_PERM_STORE_VIOLATION))
   // R19 increment 1 -- 32-byte alignment moved HERE from the OCL.C / OCS.C
   // callers, where it ran AFTER this whole chain returned Ok. Left there, a
@@ -668,8 +682,33 @@ function clause execute VEDA_ODT_POPULATE(rs2, rs1, rd) = {
         // old value over would leave a just-populated object faulting
         // forever, which is why this is spelled out rather than inherited.
         resident   = true,
-        owner_domain = old_entry.owner_domain,
-        cow = old_entry.cow,
+        // R41 -- BOTH POLICY FIELDS ARE RESET, and they used to be carried over
+        // from whatever previously occupied the slot. A Populate MINTS A NEW
+        // OBJECT; the previous occupant's policy has no claim on it.
+        //
+        // This clause was the outlier on three counts at once. Its own sibling
+        // VEDA_ODT_POPULATE_FAST already wrote `owner_domain = VEDA_DOMAIN_ANY`
+        // and `cow = false`; the RTL cleared both for both variants, with its own
+        // stated reason ("Populate may reuse a slot whose previous object was
+        // copy-on-write -- without this, the new object would be born
+        // copy-on-write and its first write would fault for no reason"); and the
+        // odt_entry struct's own comment on owner_domain says VEDA_DOMAIN_ANY is
+        // "how every object is created", which this clause made false.
+        //
+        // R38 IS WHAT TURNED IT FROM A NUISANCE INTO A LOCKOUT. While the cow arm
+        // ignored capability permissions, a stale `cow` only meant a spurious
+        // 0x0C that a handler could clear. Now the split right belongs to whoever
+        // held PERM_STORE when the object became copy-on-write -- and for an
+        // object born copy-on-write there is no such principal, ever: Populate
+        // returns a status in rd, not a capability, so the minter must Bind, and
+        // Bind masks store off a cow entry. The object would be unwritable by
+        // anyone from the moment it was created.
+        //
+        // Found by an adversarial pass reading both layers after R38 landed. No
+        // probe composed Populate with set.cow, which is why a divergence in two
+        // policy fields survived in the differential suite.
+        owner_domain = VEDA_DOMAIN_ANY,
+        cow = false,
       });
       X(rd) = zeros();
       RETIRE_SUCCESS
