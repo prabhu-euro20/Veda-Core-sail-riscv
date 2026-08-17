@@ -736,6 +736,39 @@ overload CTag = {rCTag_bits, wCTag_bits, rCTag, wCTag}
 //
 // Sixteen explicit writes rather than a loop, matching rC/wC's own explicit
 // match style directly above, which core/regs.sail's rX/wX established.
+// R37: THE SAME FIX R24 MADE FOR THE CAPABILITY REGISTER FILE, ON THE THREE
+// REGISTERS IT MISSED.
+//
+// veda_oda, veda_tsc and veda_ssc are declared without initialisers, so Sail's
+// struct default leaves otype at 0x0000 -- and isSealedCap is
+// `otype != UNSEALED_OTYPE` with UNSEALED_OTYPE = 0xFFFF, so all three read as
+// SEALED WITH TYPE ZERO at reset. That is a type CSeal can genuinely mint, which
+// is exactly why R24 refused to leave it standing on the CRF.
+//
+// IT MATTERS MOST ON THE ODA, because veda_oda_authorized() reads
+//     veda_oda_tag & not(isSealedCap(veda_oda)) & permBit(Perms, PERM_ACCESS_SYSTEM_REGISTERS)
+// so this register's sealedness is an input to the gate on EVERY ODT-mutating
+// instruction. The gate is false at reset either way -- but only because the TAG
+// is false, which is fail-closed by accident of a different field rather than by
+// this one being right. R24's whole argument applies unchanged.
+//
+// Measured before and after (difftest/probes/p13_scr_reset.S): all three read
+// otype 0x0000 here against 0xFFFF on the RTL, while the probe's control -- an
+// untouched CRF register, which R24 already fixed -- agreed at 0xFFFF on both.
+// So the divergence was specific to these three and not a general disagreement
+// about what an unwritten capability looks like.
+//
+// OSpecialRW SWAPS rather than writes, so the reset value was directly
+// observable by software: read the old SCR out and query its otype.
+function veda_reset_scr() -> unit = {
+  veda_oda = zero_capability;
+  veda_tsc = zero_capability;
+  veda_ssc = zero_capability;
+  veda_oda_tag = false;
+  veda_tsc_tag = false;
+  veda_ssc_tag = false
+}
+
 function veda_reset_crf() -> unit = {
   C(Vcapno(0),  zero_capability);
   C(Vcapno(1),  zero_capability);

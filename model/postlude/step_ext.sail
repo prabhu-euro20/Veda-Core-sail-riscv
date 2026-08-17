@@ -40,6 +40,11 @@ function ext_reset() -> unit = {
   // its fixtures on top, so the order is load-bearing: reversed, the fixtures
   // would be erased and every R10 crossing test would lose its scaffolding.
   veda_reset_crf();
+  // R37: the three Special Capability Registers were not in R24's fix and had no
+  // reset at all, so they came up sealed with type zero -- including the ODA,
+  // whose sealedness gates every ODT-mutating instruction. Same argument, same
+  // constant, three registers R24 missed.
+  veda_reset_scr();
   veda_test_seed_odt();
   veda_pcc_base = zeros();
   veda_pcc_length = VEDA_PCC_UNBOUNDED;
