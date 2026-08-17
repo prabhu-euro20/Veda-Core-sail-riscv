@@ -33,6 +33,13 @@ function ext_post_step_hook() -> unit = ()
 // entire "no constraint until OCInvoke narrows it" design depends on
 // this exact reset value.
 function ext_reset() -> unit = {
+  // R24: BEFORE the seeding, never after. The capability register file needs a
+  // defined architectural reset -- otype 0xFFFF, not Sail's struct-default zero,
+  // which aliases a real seal type and made Rebind into an untouched register
+  // behave differently here than on the RTL. veda_test_seed_odt() then writes
+  // its fixtures on top, so the order is load-bearing: reversed, the fixtures
+  // would be erased and every R10 crossing test would lose its scaffolding.
+  veda_reset_crf();
   veda_test_seed_odt();
   veda_pcc_base = zeros();
   veda_pcc_length = VEDA_PCC_UNBOUNDED;

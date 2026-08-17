@@ -701,6 +701,61 @@ function wCTag_bits(Vcapidx(i) : vcapidx, t : bool) -> unit = wCTag(Vcapno(unsig
 overload C = {rC_bits, wC_bits, rC, wC}
 overload CTag = {rCTag_bits, wCTag_bits, rCTag, wCTag}
 
+// R24: THE CAPABILITY REGISTER FILE HAS AN ARCHITECTURAL RESET STATE, and until
+// now this layer did not give it one.
+//
+// Every other Veda register is reset explicitly in ext_reset(), and step_ext.sail
+// records why in the case of veda_pcc_length: leaving it at Sail's default
+// zero-initialisation would hard-trap on cycle one, "a real correctness
+// requirement, not defensive styling". The capability register file was the only
+// one that never got that treatment, so all sixteen registers came up at Sail's
+// struct-default zero -- INCLUDING otype.
+//
+// AND ZERO IS A LEGITIMATE SEAL TYPE. isSealedCap is `otype != UNSEALED_OTYPE`,
+// and UNSEALED_OTYPE is 0xFFFF, so an untouched register read as SEALED WITH
+// TYPE ZERO -- a type CSeal really can mint, since the otype it produces is just
+// the authority's Offset. An unwritten register was therefore indistinguishable
+// from one a program had deliberately sealed.
+//
+// That is not cosmetic, because one enforcement decision reads sealedness
+// WITHOUT a tag conjunct: Rebind (veda_bind_insts.sail) soft-fails on
+// `isSealedCap(cur)` alone, where `cur` is whatever the DESTINATION register
+// happens to hold. So Rebind into a never-written register silently refused on
+// this layer and succeeded on the RTL, whose reset otype is 0xFFFF. Same rule,
+// both layers -- the RTL's own $veda_rebind_sealed is likewise
+// `otype != 16'hFFFF` with no tag term. Only the reset value differed.
+//
+// The RTL is the correct one and this layer moves: 0xFFFF is the architecturally
+// reserved "no type", is refused as a requested otype by CSeal, and cannot be
+// reached by sealing. 0x0000 is an accident of zero-initialisation that happens
+// to alias a real type.
+//
+// zero_capability (veda_types.sail) already spelled this state out exactly --
+// every field zero, otype = UNSEALED_OTYPE -- and had NO callers. The constant
+// was written and never applied.
+//
+// Sixteen explicit writes rather than a loop, matching rC/wC's own explicit
+// match style directly above, which core/regs.sail's rX/wX established.
+function veda_reset_crf() -> unit = {
+  C(Vcapno(0),  zero_capability);
+  C(Vcapno(1),  zero_capability);
+  C(Vcapno(2),  zero_capability);
+  C(Vcapno(3),  zero_capability);
+  C(Vcapno(4),  zero_capability);
+  C(Vcapno(5),  zero_capability);
+  C(Vcapno(6),  zero_capability);
+  C(Vcapno(7),  zero_capability);
+  C(Vcapno(8),  zero_capability);
+  C(Vcapno(9),  zero_capability);
+  C(Vcapno(10), zero_capability);
+  C(Vcapno(11), zero_capability);
+  C(Vcapno(12), zero_capability);
+  C(Vcapno(13), zero_capability);
+  C(Vcapno(14), zero_capability);
+  C(Vcapno(15), zero_capability);
+  crTags = zeros()
+}
+
 // The Object Descriptor Table: flat, single-level, system-wide, indexed
 // directly by the 23-bit Object_ID (widened from 16 bits this pass --
 // VEDA_CORE_SPEC.md Section 2/5.1, veda-core/SCALING_BARRIERS_RESEARCH.md
