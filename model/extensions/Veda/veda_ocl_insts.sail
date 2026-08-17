@@ -76,24 +76,60 @@ function veda_check_access(capidx : vcapno, offset : xlenbits, width : int, need
   else if not(entry.valid) | entry.generation != cap.generation then Err(veda_trap(vcapno_to_vcapidx(capidx), VEDA_CAUSE_TAG_VIOLATION))
   else if isSealedCap(cap) then Err(veda_trap(vcapno_to_vcapidx(capidx), VEDA_CAUSE_SEAL_VIOLATION))
   else if need_load & not(permBit(cap.Perms, PERM_LOAD)) then Err(veda_trap(vcapno_to_vcapidx(capidx), VEDA_CAUSE_PERM_LOAD_VIOLATION))
-  // R19 increment 1 -- the store-permission arm is GATED on not-cow, and that
-  // gate is what lets the copy-on-write arm move to the BOTTOM of this chain.
+  // ═══ R38 -- THE COPY-ON-WRITE FAULT'S ELIGIBILITY PREDICATE ═══
   //
-  // Why the gate is load-bearing and cannot simply be dropped: veda_bind_perms
-  // masks a cow object's Perms with 0xFFF7, clearing PERM_STORE (bit 3) and
-  // leaving PERM_LOAD (bit 2). So a capability freshly bound to a cow object
-  // lacks store permission BY CONSTRUCTION. Without this gate, moving the cow
-  // arm below this one would make every fork-triggered write report "you may
-  // not write" instead of "copy me", and copy-on-write would never fire at all.
-  // The property the previous ordering bought -- a cow object reports 0x0C and
-  // never 0x13 -- is preserved exactly, by the gate rather than by precedence.
+  // This arm used to carry `& not(entry.cow)`. R19 increment 1 added that gate so
+  // the cow arm could move to the bottom of the chain, and its reasoning was
+  // sound as far as it went: veda_bind_perms masks a cow entry's Perms with
+  // 0xFFF7, so a capability freshly bound to a cow object lacks PERM_STORE by
+  // construction, and without the gate such a store would report "you may not
+  // write" instead of "copy me".
   //
-  // NOTE the premise recorded earlier in this file was too strong: it is not
-  // true that EVERY capability to a cow object lacks store. The parent's
-  // pre-cow capability retains it (set.cow deliberately does not bump the
-  // generation -- that is the fork case), and both are handled here: the parent
-  // skips this arm because it HAS store, the child skips it because of the gate.
-  else if need_store & not(permBit(cap.Perms, PERM_STORE)) & not(entry.cow) then Err(veda_trap(vcapno_to_vcapidx(capidx), VEDA_CAUSE_PERM_STORE_VIOLATION))
+  // WHAT THAT SENTENCE DOES NOT SAY is who SHOULD be told "copy me". With the
+  // gate in place the answer was: everyone. 0x0C is not a refusal, it is a
+  // REPAIR REQUEST -- it instructs a handler to allocate, copy, and hand back a
+  // fresh writable object. So a principal handed a read-only view could force an
+  // allocation on every store attempt, indefinitely, holding no write authority
+  // at all. Measured in difftest/probes/p14_cow_eligibility.S, which recorded
+  // that both layers agree on it. Handing a private writable object to a
+  // principal that was never given write is not resource waste; it is the
+  // amplification the rest of this chain exists to prevent.
+  //
+  // THE PREDICATE IS PERM_STORE, AND NO NEW PERMISSION BIT IS NEEDED. Dropping
+  // the gate makes the capability's own store permission decide:
+  //     has PERM_STORE  + cow -> falls through to the cow arm -> 0x0C, splits
+  //     lacks PERM_STORE + cow -> 0x13 here, refused
+  // and because set.cow deliberately does not bump the generation, the
+  // capabilities that still carry PERM_STORE are exactly those minted BEFORE the
+  // object became copy-on-write. So the rule the hardware now enforces is:
+  // WHOEVER HELD WRITE AUTHORITY AT THE MOMENT THE OBJECT BECAME COPY-ON-WRITE
+  // MAY CAUSE THE SPLIT. That is what copy-on-write has always meant -- the copy
+  // is owed to the writers that existed at fork, not to anyone who later learns
+  // the name. Fork still works: the parent's own capability predates set.cow, and
+  // a child inherits a COPY of it rather than re-Binding the name.
+  //
+  // AND IT IS NOT ADVISORY, WHICH IS WHY THE BIND-TIME MASK MUST STAY. Two
+  // earlier proposals put the predicate in a bit the delegator clears with
+  // CAndPerm -- a new "may split" permission, or dropping the mask so PERM_STORE
+  // itself carried it. Both are refuted by this codebase's own correction,
+  // recorded at veda_bind_insts.sail:303-307: "a capability handed out with store
+  // stripped is only ADVISORY, because the holder can re-Bind the name and get a
+  // fresh, fully-permissioned one. So the attenuation has to happen HERE, where
+  // the entry is the authority and no re-derivation can escape it." Bind's domain
+  // gate defaults to VEDA_DOMAIN_ANY, so anyone may re-Bind and re-derive. The
+  // 0xFFF7 mask is the only thing a re-Bind cannot escape -- and this arm is what
+  // finally gives that mask something to enforce. Until now the mask did no
+  // enforcement work at all: the cow arm caught every write regardless of Perms,
+  // so the mask's sole observable effect was the value CGetPerm returned.
+  //
+  // WHAT THIS DELIBERATELY CANNOT EXPRESS: "read-only but splittable". If an
+  // entry's Perms lack PERM_STORE, no capability to it may ever force a copy.
+  // That is not a loss. A reader who wants a private writable version should
+  // ALLOCATE one and copy through the read capability it already holds -- the
+  // same self-service answer R19 decided for the copier itself. Copy-on-write
+  // exists to DEFER a copy that is already owed, not to manufacture an
+  // entitlement the holder never had.
+  else if need_store & not(permBit(cap.Perms, PERM_STORE)) then Err(veda_trap(vcapno_to_vcapidx(capidx), VEDA_CAUSE_PERM_STORE_VIOLATION))
   // R19 increment 1 -- 32-byte alignment moved HERE from the OCL.C / OCS.C
   // callers, where it ran AFTER this whole chain returned Ok. Left there, a
   // misaligned store to a cow object would report 0x0C in Sail and 0x08 in the
@@ -112,10 +148,23 @@ function veda_check_access(capidx : vcapno, offset : xlenbits, width : int, need
   // `cap.Base` -- the capability's CACHED copy -- never from entry.Base. A
   // page-out that frees this object's frame and reassigns it elsewhere is
   // therefore invisible to this path: `valid` stays true (the object still
-  // exists), and `generation` is bumped only by Populate and Destroy, never
-  // by paging. So a capability minted while the object was resident and
-  // held across a page-out would read and write whatever now occupies that
-  // memory. The codebase already records that held-across-page-out state as
+  // exists), and at the time this arm was written `generation` was bumped only
+  // by Populate and Destroy, never by paging. So a capability minted while the
+  // object was resident and held across a page-out would read and write
+  // whatever now occupies that memory.
+  //
+  // THAT SENTENCE IS A FOSSIL AND IS CORRECTED HERE RATHER THAN DELETED,
+  // because it is the reason this arm exists and it is no longer true. The
+  // page-out/page-in pair landed after it: VEDA_ODT_PAGE_OUT sets
+  // `generation = old_entry.generation + 1`, so paging DOES invalidate every
+  // outstanding capability, and VEDA_ODT_PAGE_IN preserves the generation only
+  // because no live capability can exist across that window. This arm is still
+  // correct and still load-bearing -- a capability can be held across a
+  // page-out on the RTL side and through the fixture-seeded {valid, not
+  // resident} state -- but anyone reading the old wording to answer "does
+  // paging kill capabilities?" would get the wrong answer, and one did:
+  // sail_tests/vc_r38_cow_paging_lockout.S exists because the true answer
+  // turns a copy-on-write object permanently unsplittable. The codebase already records that held-across-page-out state as
   // legal and reachable for regions; for objects it is worse, because it is
   // the contents themselves that moved.
   //
@@ -354,13 +403,21 @@ function veda_check_nmc_access(capidx : vcapno, width : int) -> result(physaddr,
   // this same path missing the store permission entirely, one increment ago;
   // the question that finds it is "where is memory WRITTEN", never "where is
   // the cow bit already read".
-  // R19 increment 1 -- gated exactly as veda_check_access's arm is, and for the
-  // same reason. NOTE these two arms are deliberately NOT textually identical
-  // to that function's: NMC_ADD is unconditionally read-modify-write, so there
-  // is no need_store conjunct here. The two checkers are otherwise kept
-  // textually parallel on purpose so they stay diffable -- this one arm is the
-  // exception, and it is an exception by design, not a transcription error.
-  else if not(permBit(cap.Perms, PERM_STORE)) & not(entry.cow) then Err(veda_trap(vcapno_to_vcapidx(capidx), VEDA_CAUSE_PERM_STORE_VIOLATION))
+  // R38 -- ungated here for exactly the reason given at veda_check_access's own
+  // store arm, and it MUST move with it. A predicate enforced on one of two
+  // dereference checkers is not enforced: NMC_ADD writes memory too, and a
+  // principal refused a split through OCS.D could simply ask for it through
+  // NMC_ADD. R15 already found this path missing the store permission entirely
+  // one increment ago -- the same pair of checkers, the same omission, and the
+  // question that finds it is still "where is memory WRITTEN", never "where is
+  // the cow bit already read".
+  //
+  // NOTE these two arms remain deliberately NOT textually identical: NMC_ADD is
+  // unconditionally read-modify-write, so there is no need_store conjunct here.
+  // The two checkers are otherwise kept textually parallel on purpose so they
+  // stay diffable -- this one arm is the exception, and it is an exception by
+  // design, not a transcription error.
+  else if not(permBit(cap.Perms, PERM_STORE)) then Err(veda_trap(vcapno_to_vcapidx(capidx), VEDA_CAUSE_PERM_STORE_VIOLATION))
   else if unsigned(offset) + width > unsigned(cap.Length) then Err(veda_trap(vcapno_to_vcapidx(capidx), VEDA_CAUSE_BOUNDS_VIOLATION))
   // DESIGN_02 -- OBJECT residency, checked HERE and not only at Bind. This
   // term closes a real hole, and it is free: `entry` is already read above,
@@ -371,10 +428,23 @@ function veda_check_nmc_access(capidx : vcapno, width : int) -> result(physaddr,
   // `cap.Base` -- the capability's CACHED copy -- never from entry.Base. A
   // page-out that frees this object's frame and reassigns it elsewhere is
   // therefore invisible to this path: `valid` stays true (the object still
-  // exists), and `generation` is bumped only by Populate and Destroy, never
-  // by paging. So a capability minted while the object was resident and
-  // held across a page-out would read and write whatever now occupies that
-  // memory. The codebase already records that held-across-page-out state as
+  // exists), and at the time this arm was written `generation` was bumped only
+  // by Populate and Destroy, never by paging. So a capability minted while the
+  // object was resident and held across a page-out would read and write
+  // whatever now occupies that memory.
+  //
+  // THAT SENTENCE IS A FOSSIL AND IS CORRECTED HERE RATHER THAN DELETED,
+  // because it is the reason this arm exists and it is no longer true. The
+  // page-out/page-in pair landed after it: VEDA_ODT_PAGE_OUT sets
+  // `generation = old_entry.generation + 1`, so paging DOES invalidate every
+  // outstanding capability, and VEDA_ODT_PAGE_IN preserves the generation only
+  // because no live capability can exist across that window. This arm is still
+  // correct and still load-bearing -- a capability can be held across a
+  // page-out on the RTL side and through the fixture-seeded {valid, not
+  // resident} state -- but anyone reading the old wording to answer "does
+  // paging kill capabilities?" would get the wrong answer, and one did:
+  // sail_tests/vc_r38_cow_paging_lockout.S exists because the true answer
+  // turns a copy-on-write object permanently unsplittable. The codebase already records that held-across-page-out state as
   // legal and reachable for regions; for objects it is worse, because it is
   // the contents themselves that moved.
   //
