@@ -550,7 +550,9 @@
       "supported": true
     },
     "Veda": {
-      "supported": true
+      "supported": true,
+      "//test_fixtures": "R24 open half: the capability-register TEST FIXTURES, off by default. They are scaffolding for states the ISA deliberately cannot construct, not architecture, and reset must not hand a program four tagged capabilities as a normative claim. The layer-parallel twin on the RTL side is the +veda_fixtures plusarg. Sail config keys are all REQUIRED with no default mechanism, so this has to be declared here as well as in the run configs -- which is itself the honest cost of the switch and is recorded rather than hidden.",
+      "test_fixtures": false
     },
     "Zicbop": {
       "supported": true

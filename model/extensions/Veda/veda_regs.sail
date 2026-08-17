@@ -1373,82 +1373,90 @@ function veda_test_seed_odt() -> unit = {
   // all). No existing test reads c10/c11/c13 before writing it
   // (grep-verified before choosing, and re-proven by the full-corpus
   // regression run).
-  wC(Vcapno(10), struct {
-    Object_ID  = to_bits(44, 33554440), // (2 << 24) | 8
-    Base       = 0x00000080030000,
-    Length     = 0x0000000040,
-    Offset     = zeros(),
-    Perms      = 0x0402, // Execute | Invoke
-    otype      = 0x0042,
-    generation = zeros(),
-    flags      = zeros(),
-  });
-  wCTag(Vcapno(10), true);
-  wC(Vcapno(11), struct {
-    Object_ID  = to_bits(44, 33554441), // (2 << 24) | 9
-    Base       = 0x00000080030000,
-    Length     = 0x0000000040,
-    Offset     = zeros(),
-    Perms      = 0x0400, // Invoke only, non-executable
-    otype      = 0x0042,
-    generation = zeros(),
-    flags      = zeros(),
-  });
-  wCTag(Vcapno(11), true);
-  wC(Vcapno(13), struct {
-    Object_ID  = to_bits(44, 33554442), // (2 << 24) | 10
-    Base       = 0x00000080030000,
-    Length     = 0x0000000040,
-    Offset     = zeros(),
-    Perms      = 0x0002, // Execute
-    otype      = VEDA_OTYPE_SENTRY,
-    generation = zeros(),
-    flags      = zeros(),
-  });
-  wCTag(Vcapno(13), true);
-  // c14 = region-3 SENTRY, the rt_valid-gate fixture (RT[3] is
-  // {valid=false, resident=true}). OCReturn through it must REGION_FAULT
-  // BECAUSE rt_valid is false, even though resident is true -- the sole
-  // test that pins the fail-closed rt_valid conjunct. Object_ID (3<<24)|1.
-  wC(Vcapno(14), struct {
-    Object_ID  = to_bits(44, 50331649), // (3 << 24) | 1
-    Base       = 0x00000080040000,
-    Length     = 0x0000000040,
-    Offset     = zeros(),
-    Perms      = 0x0002, // Execute
-    otype      = VEDA_OTYPE_SENTRY,
-    generation = zeros(),
-    flags      = zeros(),
-  });
-  wCTag(Vcapno(14), true);
-  // ── DESIGN_02 residency fixture: a capability held across an eviction ──
-  // c12 names Object_ID 600, which is seeded valid with generation 0 but
-  // resident = false. This is the ONLY way to reach the dereference-side
-  // residency gate: no instruction sequence can produce such a capability,
-  // because Bind is residency-gated and Populate is precisely what
-  // establishes residency. That is the mechanism working, not a test
-  // inconvenience -- and it is exactly the legal, reachable state of a
-  // capability minted while an object was resident and still held after a
-  // pager evicted its contents.
-  //
-  // Deliberately well-formed in EVERY other respect -- tagged, unsealed,
-  // generation matching the entry, Load|Store permitted, Length covering an
-  // in-bounds access -- so it passes all five earlier checks in
-  // veda_check_access and residency is the FIRST and ONLY thing that can
-  // stop it. A fixture that failed an earlier check would prove nothing
-  // about this gate.
-  //
-  // c12 chosen after grepping the corpus: its every read is preceded by a
-  // write on the immediately-previous line, so seeding it disturbs nothing.
-  wC(Vcapno(12), struct {
-    Object_ID  = to_bits(44, 600),
-    Base       = 0x00000080010500,  // matches Object_ID 600's seeded Base
-    Length     = 0x0000000040,
-    Offset     = zeros(),
-    Perms      = 0x000C,            // Load|Store
-    otype      = UNSEALED_OTYPE,
-    generation = zeros(),           // matches the entry -- no staleness
-    flags      = zeros(),
-  });
-  wCTag(Vcapno(12), true)
+  // R24 (open half): the CAPABILITY-REGISTER fixtures below are TEST
+  // SCAFFOLDING, not architecture, and are gated on an explicit switch that is
+  // OFF by default (veda_types.sail). The ODT seeding above is left alone --
+  // that is a separate question and a separate increment. The differential
+  // harness passes neither switch and therefore measures the real architectural
+  // reset; the self-check suites pass both and keep every assertion they had.
+  if veda_test_fixtures then {
+    wC(Vcapno(10), struct {
+      Object_ID  = to_bits(44, 33554440), // (2 << 24) | 8
+      Base       = 0x00000080030000,
+      Length     = 0x0000000040,
+      Offset     = zeros(),
+      Perms      = 0x0402, // Execute | Invoke
+      otype      = 0x0042,
+      generation = zeros(),
+      flags      = zeros(),
+    });
+    wCTag(Vcapno(10), true);
+    wC(Vcapno(11), struct {
+      Object_ID  = to_bits(44, 33554441), // (2 << 24) | 9
+      Base       = 0x00000080030000,
+      Length     = 0x0000000040,
+      Offset     = zeros(),
+      Perms      = 0x0400, // Invoke only, non-executable
+      otype      = 0x0042,
+      generation = zeros(),
+      flags      = zeros(),
+    });
+    wCTag(Vcapno(11), true);
+    wC(Vcapno(13), struct {
+      Object_ID  = to_bits(44, 33554442), // (2 << 24) | 10
+      Base       = 0x00000080030000,
+      Length     = 0x0000000040,
+      Offset     = zeros(),
+      Perms      = 0x0002, // Execute
+      otype      = VEDA_OTYPE_SENTRY,
+      generation = zeros(),
+      flags      = zeros(),
+    });
+    wCTag(Vcapno(13), true);
+    // c14 = region-3 SENTRY, the rt_valid-gate fixture (RT[3] is
+    // {valid=false, resident=true}). OCReturn through it must REGION_FAULT
+    // BECAUSE rt_valid is false, even though resident is true -- the sole
+    // test that pins the fail-closed rt_valid conjunct. Object_ID (3<<24)|1.
+    wC(Vcapno(14), struct {
+      Object_ID  = to_bits(44, 50331649), // (3 << 24) | 1
+      Base       = 0x00000080040000,
+      Length     = 0x0000000040,
+      Offset     = zeros(),
+      Perms      = 0x0002, // Execute
+      otype      = VEDA_OTYPE_SENTRY,
+      generation = zeros(),
+      flags      = zeros(),
+    });
+    wCTag(Vcapno(14), true);
+    // ── DESIGN_02 residency fixture: a capability held across an eviction ──
+    // c12 names Object_ID 600, which is seeded valid with generation 0 but
+    // resident = false. This is the ONLY way to reach the dereference-side
+    // residency gate: no instruction sequence can produce such a capability,
+    // because Bind is residency-gated and Populate is precisely what
+    // establishes residency. That is the mechanism working, not a test
+    // inconvenience -- and it is exactly the legal, reachable state of a
+    // capability minted while an object was resident and still held after a
+    // pager evicted its contents.
+    //
+    // Deliberately well-formed in EVERY other respect -- tagged, unsealed,
+    // generation matching the entry, Load|Store permitted, Length covering an
+    // in-bounds access -- so it passes all five earlier checks in
+    // veda_check_access and residency is the FIRST and ONLY thing that can
+    // stop it. A fixture that failed an earlier check would prove nothing
+    // about this gate.
+    //
+    // c12 chosen after grepping the corpus: its every read is preceded by a
+    // write on the immediately-previous line, so seeding it disturbs nothing.
+    wC(Vcapno(12), struct {
+      Object_ID  = to_bits(44, 600),
+      Base       = 0x00000080010500,  // matches Object_ID 600's seeded Base
+      Length     = 0x0000000040,
+      Offset     = zeros(),
+      Perms      = 0x000C,            // Load|Store
+      otype      = UNSEALED_OTYPE,
+      generation = zeros(),           // matches the entry -- no staleness
+      flags      = zeros(),
+    });
+    wCTag(Vcapno(12), true)
+  }
 }

@@ -16,6 +16,36 @@ mapping clause extensionName = Ext_Veda <-> "veda"
 function clause hartSupports(Ext_Veda) = config extensions.Veda.supported
 function clause currentlyEnabled(Ext_Veda) = hartSupports(Ext_Veda)
 
+// R24 (open half) -- TEST FIXTURES ARE NOT ARCHITECTURE.
+//
+// veda_test_seed_odt() seeds five CAPABILITY REGISTERS at reset -- sealed
+// region-2 code/data/sentry and a residency subject -- so the R10 crossing tests
+// and the dereference-side residency test have states the ISA deliberately
+// cannot construct. That scaffolding is legitimate; putting it in the
+// ARCHITECTURAL RESET is not. A specification that says "at reset c12 holds a
+// sealed region-2 code capability" is not something a second implementer could
+// honour, and it makes reset hand the running program five TAGGED capabilities,
+// two of them carrying Execute|Invoke, as a normative claim. On a machine whose
+// thesis is that authority is derived, reset-with-authority is the one state
+// where nothing derived it.
+//
+// So the fixtures move behind an explicit switch that is OFF by default, and
+// the layer-parallel twin on the RTL side is the +veda_fixtures plusarg. The
+// differential harness passes NEITHER, so it measures architecture rather than
+// scaffolding; the self-check suites pass BOTH, so their coverage is unchanged.
+//
+// THE SWITCH HAS ITS OWN DRIFT HAZARD AND IT IS HANDLED RATHER THAN HOPED AWAY.
+// The adversarial pass on this design pointed out that the Sail value lives in a
+// JSON shared by every runner in a DIFFERENT repository from the model that
+// declares the key -- so one file could not be true for the suites and false for
+// the harness. difftest/ therefore gets its OWN config, and rundiff.sh points at
+// it. Two files, two values, and the harness that would notice them drifting is
+// the one thing that had to be fixed first (R31).
+//
+// Fail-closed on configuration too: `config` has no default, so a JSON that
+// omits the key does not silently seed -- it refuses to run.
+let veda_test_fixtures : bool = config extensions.Veda.test_fixtures
+
 // Capability Register File index. 16 registers (c0-c15, VEDA_CORE_SPEC.md
 // Section 2) need 4 bits. Named vcapidx/vcapno (not cregidx/cregno) to
 // avoid a real name collision with core/regs.sail's existing cregidx,
