@@ -1076,7 +1076,33 @@ function veda_region_is_resident(region : bits(20)) -> bool = {
   if region == veda_current_region then true
   else {
     let ru = unsigned(region);
-    if ru >= VEDA_REGION_MODELED then false else veda_region_table[ru].region_resident
+    // ═══ R55 -- rt_valid WAS MISSING HERE, AND ONLY HERE ══════════════════
+    //
+    // This model has TWO region-residency predicates and they did not agree:
+    //     veda_region_rt_resident  = rt_valid & region_resident   <- OCInvoke, OCReturn
+    //     veda_region_is_resident  =           region_resident    <- veda.bind
+    // The comment on the first one says rt_valid "gains its first-ever consumer
+    // here: a slot that has never been configured must fail closed even if its
+    // resident bit were somehow set." It gained that consumer at the crossings
+    // and NOT on the minting path.
+    //
+    // Region 3 is R10's own gate fixture, {rt_valid = false, region_resident =
+    // true} -- built precisely to catch this. MEASURED, with its control:
+    //     bind into region 3 {rt_valid=0, resident=1}  ->  0 traps, TAG 1  (minted)
+    //     bind into region 2 {rt_valid=1, resident=0}  ->  1 trap,  tag 0  (refused)
+    // So the predicate looked at region_resident and not at rt_valid, and
+    // veda.bind minted a fully-permissioned capability out of a region slot that
+    // had never been configured.
+    //
+    // THE RTL WAS ALREADY RIGHT -- $veda_region_resident in veda_core.tlv reads
+    // `rt_valid[...] && rt_resident[...]`. So this was a SAIL-ONLY divergence in
+    // which THE SPECIFICATION WAS MORE PERMISSIVE THAN THE HARDWARE: a
+    // capability the spec said you could mint, the hardware refused. On a
+    // Sail-first project that is the worse direction for a divergence to run.
+    // Closed in the RTL's direction, which is also what the architecture's own
+    // comment says it intends.
+    if ru >= VEDA_REGION_MODELED then false
+    else veda_region_table[ru].rt_valid & veda_region_table[ru].region_resident
   }
 }
 
