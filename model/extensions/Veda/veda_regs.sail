@@ -229,6 +229,37 @@ val veda_crbr_save_and_reset : unit -> unit
 val veda_crbr_restore_on_xret : unit -> unit
 val veda_crbr_release : unit -> unit
 
+// ═══ THE BIND-SIDE FAULT-IDENTIFICATION CHANNEL (DESIGN_02's own prerequisite)
+//
+// DESIGN_02:293-297 names this gap in these words and says where it belongs in
+// the order of work:
+//   "The handler cannot identify which object faulted. `mtval` carries
+//    {cap_idx, cause}, not an Object_ID ... That is a software workaround for a
+//    missing architectural channel, and it should be resolved BEFORE `backing`
+//    is designed rather than after."
+//
+// CGetObjectID closed it for the COPY-ON-WRITE fault, where a live capability
+// exists to interrogate. It does NOT close it on the BIND side: the residency
+// trap passes `rd`, the destination register of a Bind that never completed, so
+// no capability names the faulting object and nothing can recover it. A pager
+// written today would have to decode the faulting instruction at mepc.
+//
+// FAIL-CLOSED BY CONSTRUCTION, and this is the design decision worth stating.
+// The obvious implementation threads the Object_ID through veda_trap, which has
+// FIFTY-THREE call sites -- and a scripted mass-edit across sites that look
+// alike is exactly what produced R58. Instead veda_trap is left untouched and a
+// SECOND entry point veda_trap_obj carries the name. A site that has not been
+// converted stages nothing, the chokepoint below writes the sentinel, and the
+// handler reads VEDA_OBJECT_NONE -- "I do not know", which is the safe answer.
+// There is no edit anywhere that can make this register report the WRONG
+// object; the worst an omission can do is report none.
+register veda_mfaultobj : bits(44)
+// The staging flag exists so the chokepoint can tell "nothing was staged this
+// trap" from "the object staged happens to be zero". Same reason the CRBR shadow
+// needed an out-of-window sentinel rather than 0 (R10), and the same reason R12
+// gave the trap frame a depth rather than inferring one.
+register veda_fault_obj_staged : bool
+
 function veda_pcc_save_and_reset() -> unit = {
   // R12. Capture ONLY on the outermost trap. At depth > 0 an outer save is
   // already held and must not be overwritten -- that overwrite was the
@@ -276,6 +307,12 @@ function veda_pcc_save_and_reset() -> unit = {
   // once -- the Milestone-21 lesson was precisely that per-site additions
   // miss paths.
   veda_crbr_save_and_reset();
+  // The fault-object channel's fail-closed half, landed at this same chokepoint
+  // and for the reason the comment above gives: per-site additions miss paths.
+  // Any trap whose instruction did not STAGE a name reports the sentinel, so a
+  // name can never survive from one trap into the next.
+  if not(veda_fault_obj_staged) then veda_mfaultobj = VEDA_OBJECT_NONE;
+  veda_fault_obj_staged = false;
 }
 
 // Automatic restore-on-mret/sret counterpart, matching real CHERI's own
@@ -522,6 +559,7 @@ mapping clause csr_name_map = 0x7C5 <-> "veda_mode"
 // established "capability metadata is always inspectable" principle.
 mapping clause csr_name_map = 0x7C6 <-> "veda_current_region"
 mapping clause csr_name_map = 0x7C7 <-> "veda_saved_region"
+mapping clause csr_name_map = 0x7C9 <-> "veda_mfaultobj"
 // R12: read-only status for the trap-nesting state. Without it the depth
 // and poison bits are architecturally invisible, and a handler cannot tell
 // WHY a return was denied. Read-only by construction, following 0x7C6/7:
@@ -540,6 +578,7 @@ function clause is_CSR_accessible(0x7C5, _, _) = currentlyEnabled(Ext_Veda)
 // is why no write_CSR(0x7C6/0x7C7) clause exists or is needed.
 function clause is_CSR_accessible(0x7C6, _, access_type) = currentlyEnabled(Ext_Veda) & (access_type == CSRRead)
 function clause is_CSR_accessible(0x7C7, _, access_type) = currentlyEnabled(Ext_Veda) & (access_type == CSRRead)
+function clause is_CSR_accessible(0x7C9, _, access_type) = currentlyEnabled(Ext_Veda) & (access_type == CSRRead)
 function clause is_CSR_accessible(0x7C8, _, access_type) = currentlyEnabled(Ext_Veda) & (access_type == CSRRead)
 
 function clause read_CSR(0x7C0) = veda_to_xlen(zero_extend(veda_pcc_base))
@@ -1128,6 +1167,13 @@ function veda_crbr_release() -> unit = {
 // them. Accessibility and the name map are declared up with the others.
 function clause read_CSR(0x7C6) = zero_extend(veda_current_region)
 function clause read_CSR(0x7C7) = zero_extend(veda_saved_region)
+// The faulting object's name. Read-only, Ext_Veda-gated, no write_CSR clause --
+// the identical discipline as 0x7C6/0x7C7/0x7C8, and for the identical reason:
+// a writable fault-report register is a forgeable one. 0x7C0-0x7FF is the
+// RISC-V-allocated custom range, so a Veda object name belongs here rather than
+// widened into mtval, whose low ten bits are already load-bearing (vc_cow_repair.S
+// does `srli x18, x25, 5` on them).
+function clause read_CSR(0x7C9) = veda_to_xlen(zero_extend(veda_mfaultobj))
 // {poison, depth}: bit 8 is poison, bits 7..0 are the depth.
 function clause read_CSR(0x7C8) = zero_extend([bool_to_bit(veda_trap_poison)] @ veda_trap_depth)
 

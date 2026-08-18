@@ -58,6 +58,13 @@ function ext_reset() -> unit = {
   // the exact analogue of the mepcc pair above (region 0 is a legitimate
   // region, so the empty sentinel must be an out-of-window value instead).
   veda_saved_region = VEDA_REGION_NONE;
+  // R64: the fault-object channel resets to the sentinel, NOT to zero. Object 0
+  // is a legal name, so a zero reset would make "nothing has faulted" and
+  // "object 0 faulted" the same reading -- the identical argument R10 used to
+  // give the CRBR shadow an out-of-window sentinel, and the reason the first
+  // version of this register read 0 and its own test caught it.
+  veda_mfaultobj = VEDA_OBJECT_NONE;
+  veda_fault_obj_staged = false;
   veda_saved_region_base = zeros();
   // Milestone 18: explicit zero, matching this function's own existing
   // explicit-reset style above (Sail's own default is already zero).

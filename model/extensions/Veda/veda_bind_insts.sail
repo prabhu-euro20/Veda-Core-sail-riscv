@@ -171,6 +171,18 @@ function veda_trap(cap_idx : vcapidx, cause : bits(5)) -> ExecutionResult = {
   trap(make_sync_exception(E_Extension(()), veda_xtval(idx, cause)))
 }
 
+// The fault-object channel's staging half. Deliberately a SECOND entry point
+// rather than a third parameter on veda_trap: veda_trap has fifty-three call
+// sites, and editing fifty-three near-identical sites by script is the exact
+// shape that produced R58. Every unconverted site therefore stages nothing and
+// reports VEDA_OBJECT_NONE at the chokepoint -- an omission can only ever cost
+// information, never produce a wrong name.
+function veda_trap_obj(cap_idx : vcapidx, cause : bits(5), object_id : bits(44)) -> ExecutionResult = {
+  veda_mfaultobj = object_id;
+  veda_fault_obj_staged = true;
+  veda_trap(cap_idx, cause)
+}
+
 // Bind-mode field, VEDA_CORE_SPEC.md Section 4: only imm[1:0] used.
 enum veda_bind_mode = {VEDA_BIND, VEDA_BIND_NOTRAP, VEDA_REBIND, VEDA_BIND_RESERVED}
 
@@ -240,7 +252,7 @@ function clause execute VEDA_BINDINST(mode_bits, rs1, rd) = {
   // "manipulate" soft-fail condition (Tag-clear would wrongly report
   // not-found); it must fault to the pager regardless of mode.
   let region = object_id[43 .. 24];
-  if not(veda_region_is_resident(region)) then veda_trap(rd, VEDA_CAUSE_REGION_FAULT)
+  if not(veda_region_is_resident(region)) then veda_trap_obj(rd, VEDA_CAUSE_REGION_FAULT, object_id)
   else {
   let e = odt_lookup(object_id);
   // Milestone 12 (VEDA_CORE_SPEC.md §4.1): an object with no live owner
@@ -313,8 +325,8 @@ function clause execute VEDA_BINDINST(mode_bits, rs1, rd) = {
   // go run the pager is worse than useless -- it is a hint about an object that
   // is none of its business. Same ordering argument DESIGN_02 used to put
   // residency last among the entry-derived tests.
-  if not(veda_bind_domain_ok(e.owner_domain)) then veda_trap(rd, VEDA_CAUSE_DOMAIN_VIOLATION)
-  else if e.valid & not(e.resident) then veda_trap(rd, VEDA_CAUSE_RESIDENCY_FAULT)
+  if not(veda_bind_domain_ok(e.owner_domain)) then veda_trap_obj(rd, VEDA_CAUSE_DOMAIN_VIOLATION, object_id)
+  else if e.valid & not(e.resident) then veda_trap_obj(rd, VEDA_CAUSE_RESIDENCY_FAULT, object_id)
   else
 
   match mode {
@@ -408,14 +420,14 @@ function clause execute VEDA_BINDINST(mode_bits, rs1, rd) = {
           wCTag(rdno, false);
           RETIRE_SUCCESS
         } else {
-          veda_trap(rd, VEDA_CAUSE_OWNER_VIOLATION)
+          veda_trap_obj(rd, VEDA_CAUSE_OWNER_VIOLATION, object_id)
         }
       } else if mode == VEDA_BIND_NOTRAP then {
         wC(rdno, zero_capability);
         wCTag(rdno, false);
         RETIRE_SUCCESS
       } else {
-        veda_trap(rd, VEDA_CAUSE_OBJECT_NOT_FOUND)
+        veda_trap_obj(rd, VEDA_CAUSE_OBJECT_NOT_FOUND, object_id)
       }
     },
   }
