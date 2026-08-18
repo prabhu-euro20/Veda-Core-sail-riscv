@@ -238,7 +238,19 @@ function permBit(perms : bits(16), b : range(0,15)) -> bool = perms[b] == 0b1
 // PHASE 1 INCREMENT 2 SCOPE NOTE (DESIGN_01 decision 6, stated so the
 // asymmetry is not mistaken for an oversight): the CAPABILITY widened to
 // Object_ID(44)/Base(56)/Length(40)/generation(24), but this ODT ENTRY
-// deliberately did NOT. Bind zero-extends the still-narrow entry fields into
+// deliberately did NOT.
+//
+// ═══ THIS BLOCK IS A FOSSIL. INCREMENT 3 WIDENED THE ENTRY TOO. ════════════
+// Read the struct forty lines below before believing anything in the rest of
+// this note: `Base : bits(56)`, `Length : bits(40)`, `generation : bits(24)`.
+// The paragraph's closing claim -- that "the ODT's own domains (Base 32-bit,
+// Length 16-bit, generation 8-bit) remain the real, honest limit" -- has been
+// false since that increment, and so has its premise that the Populate operand
+// redesign is still deferred: ODT-Populate-Fast carries the full width through
+// veda_attr today. It is kept, marked, because the REASONING about why the two
+// widths were allowed to differ for one increment is still the right reasoning
+// -- and because it has already produced one wrong conclusion in a design pass
+// that cited it as proof the operand budget was exhausted. Bind zero-extends the still-narrow entry fields into
 // the wide capability, which is a lossless bridge (a 32-bit Base is a valid
 // 56-bit Base). Keeping the entry narrow here keeps the atomic struct change
 // smaller and defers the genuinely separate ODT-Populate operand redesign --

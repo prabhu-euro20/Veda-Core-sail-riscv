@@ -667,14 +667,23 @@ function clause execute VEDA_OCINVOKE(rs2, rs1) = {
     //
     // WHAT THIS DELIBERATELY DOES NOT DO, so that the absences are on the
     // record rather than discovered later:
-    //   * The TSC is NOT cleared. It has ZERO consumers on either layer --
-    //     no instruction's behaviour changes because the TSC is tagged --
-    //     so clearing it closes nothing, while the shipped switcher
-    //     (runtime/veda_sched_asm.S) installs the TSC one instruction before
-    //     entering a thread through OCRETURN. Clearing would falsify that
+    //   * The TSC is NOT cleared. CORRECTION, MADE BY R50 AND RECORDED RATHER
+    //     THAN QUIETLY REWORDED, because it was offered here as a REASON: the
+    //     sentence that used to stand here -- "it has ZERO consumers on either
+    //     layer, no instruction's behaviour changes because the TSC is tagged"
+    //     -- IS FALSE AS WRITTEN. VEDA_OSPECIALRW below copies veda_tsc_tag
+    //     into CTag(rdno), and CTag is the FIRST term of veda_check_access, so
+    //     the TSC's tag does reach a checker, by one hop. R48's conclusion
+    //     survives on its SECOND reason alone, which is the load-bearing one:
+    //     the shipped switcher (runtime/veda_sched_asm.S) installs the TSC one
+    //     instruction before entering a thread through OCRETURN. Clearing would falsify that
     //     documented contract while every round-trip assertion stayed green,
     //     because they read the value field and never the tag. The TSC's
     //     boundary semantics belong to the increment that gives it a consumer.
+    //     AND THE RETIRED FIRST REASON MUST NOT BE REUSED for the capability
+    //     register file, which is exactly where it does not hold -- see OCLEAR
+    //     below, whose entire point is that the CRF's readers are NOT
+    //     tag-gated.
     //   * `mret` is NOT touched, and it IS a fourth compartment entry
     //     (veda_pcc_restore_on_xret installs PCC and the CRBR pair). It is
     //     also the ONLY instruction that lowers privilege, and therefore the
@@ -1067,3 +1076,84 @@ function clause execute VEDA_CANDPERM(rs2, rs1, rd) = {
 
 mapping clause assembly = VEDA_CANDPERM(rs2, rs1, rd)
   <-> "candperm" ^ spc() ^ vcap_name(encdec_vcap(rd)) ^ sep() ^ vcap_name(encdec_vcap(rs1)) ^ sep() ^ reg_name(rs2)
+
+// ═══ R50 INCREMENT 1 -- OCLEAR: THE ARCHITECTURE ASSIGNED A DUTY AND SHIPPED
+//     NO TOOL FOR IT ═══════════════════════════════════════════════════════
+//
+// R50 measured that the capability register file crosses a compartment
+// boundary intact: OCInvoke's only CRF write is the IDC into c15, OCReturn and
+// OCJALR write none, and a callee simply uses whatever the caller left bound.
+// The conventional answer, and CHERI's, is that a trusted switcher clears the
+// registers it is not passing.
+//
+// THIS MACHINE COULD NOT DO THAT. There was no instruction that reliably zeroes
+// a capability register's VALUE. Every soft-fail in the derivation family
+// clears the tag and carries the source's fields verbatim -- OCA, CSetBounds,
+// CAndPerm directly above, Rebind-on-sealed. The only writes of zero_capability
+// outside reset are Bind's two miss arms, and reaching them needs the ODT
+// lookup to MISS or be wrong-hart; on a valid, resident, openly-bindable slot
+// that instruction SUCCEEDS and installs a fully-permissioned capability
+// instead of clearing. `veda.bind.notrap` is a probe whose failure mode
+// happens to look like a clear.
+//
+// AND THE TAG IS NOT ENOUGH, which is why this writes values. The query family
+// is deliberately un-gated -- no tag check, no seal check, no bounds check
+// (see its own header above) -- so an untagged register still answers
+// CGetBase with the RAW PHYSICAL BASE of the object it names, the exact
+// disclosure this file's own comment says must never reach software. This
+// project already paid for that once, as RTL-14. So OCLEAR departs from R48's
+// "tag only, never the value" discipline DELIBERATELY: R48's justification was
+// that every ODA consumer routes through veda_oda_authorized(), whose first
+// term is the tag. That is true of the ODA and FALSE of the capability
+// register file.
+//
+// THE CLEARED VALUE IS `zero_capability`, NOT ALL-ZEROS, and the difference is
+// load-bearing rather than stylistic. `zero_capability` carries
+// otype = UNSEALED_OTYPE (0xFFFF), because isSealedCap tests
+// `otype != UNSEALED_OTYPE`. Writing literal zeros would make every cleared
+// register read as SEALED -- and Rebind tests isSealedCap on its DESTINATION
+// with no tag conjunct, so a zeroed register would be permanently
+// un-Rebindable while its tag read 0 and every tag assertion in the corpus
+// stayed green. That is R24 re-created. Bind's own miss arms already write
+// zero_capability for this reason.
+//
+// UNPRIVILEGED, deliberately. Dropping authority you already hold is monotone;
+// requiring privilege to give something up is how a caller ends up unable to
+// defend itself, which is exactly what made R48 unclosable in software.
+//
+// WHY AN INSTRUCTION AND NOT JUST A RULE AT THE CROSSING. The crossing rule is
+// the next increment and is strictly larger. This one is independently
+// necessary, for a reason the crossing rule can never cover: THE TRAP PATH IS
+// A FOURTH COMPARTMENT ENTRY THAT NO CROSSING RULE REACHES. The shipped
+// switcher points mtvec at itself, is entered by a thread's ecall, and then
+// dereferences capabilities bound BEFORE any crossing from inside its own
+// handler. Capability registers surviving a trap is load-bearing shipped
+// behaviour. On the one entry hardware cannot police, an explicit clear is the
+// only tool there is.
+//
+// Custom-2, funct3 = 001, funct7 = 0011000 -- the next free slot, verified by
+// enumerating every 0b001 encdec in this file: 0001000, 0001001, 0001010,
+// 0010000..0010111. rs1 and rd are reserved-zero, per R30(b).
+union clause instruction = VEDA_OCLEAR : (regidx)
+
+mapping clause encdec = VEDA_OCLEAR(rs2)
+  <-> 0b0011000 @ encdec_reg(rs2) @ 0b00000 @ 0b001 @ 0b00000 @ 0b1011011
+  when currentlyEnabled(Ext_Veda)
+
+function clause execute VEDA_OCLEAR(rs2) = {
+  // Bit i of the mask clears capability register i. Sourced from an ordinary
+  // GPR at its full width and sliced to 16 -- the same shape CAndPerm above
+  // uses for its permission mask. x0 therefore clears nothing, which makes the
+  // identity case free and gives the future crossing rule a natural default.
+  let mask : xlenbits = X(rs2);
+  foreach (i from 0 to 15) {
+    if mask[i] == bitone then {
+      wC(Vcapno(i), zero_capability);
+      wCTag(Vcapno(i), false)
+    }
+  };
+  RETIRE_SUCCESS
+}
+
+mapping clause assembly = VEDA_OCLEAR(rs2)
+  <-> "oclear" ^ spc() ^ reg_name(rs2)

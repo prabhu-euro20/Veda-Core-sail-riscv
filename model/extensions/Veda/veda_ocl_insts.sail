@@ -681,9 +681,16 @@ function veda_oda_authorized() -> bool =
 // self-attenuation for the ODA the way CSetBounds/CAndPerm give one for
 // ordinary capabilities. And veda_regs.sail records that the ODA is
 // deliberately NOT cleared by OCInvoke/OCReturn, so an ODA live across a
-// compartment crossing is inherited by the callee. Both are recorded as
-// DESIGN_07 R47 open halves; this increment makes the window load-bearing,
-// which is the prerequisite for either.
+// compartment crossing is inherited by the callee.
+//
+// R48 CLOSED THE SECOND HALF -- this text is kept because it is the reasoning
+// that led there, but it is no longer the state of the machine. Both crossings
+// now clear veda_oda_tag (veda_cap_insts.sail, VEDA_OCINVOKE and VEDA_OCRETURN),
+// after the inheritance was measured: a User compartment holding only a code and
+// a data capability destroyed the caller's object and minted over the caller's
+// window, zero traps. THE FIRST HALF IS STILL OPEN: the ODA is one global
+// register only Machine can install, so a delegate still cannot narrow its own
+// authority. See DESIGN_07 R48.
 function veda_oda_covers(base : bits(56), length : bits(40)) -> bool = {
   let o_lo : int = unsigned(veda_oda.Base);
   let o_hi : int = o_lo + unsigned(veda_oda.Length);
