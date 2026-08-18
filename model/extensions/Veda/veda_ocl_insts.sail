@@ -766,7 +766,41 @@ function clause execute VEDA_ODT_POPULATE(rs2, rs1, rd) = {
     // genuinely new object otherwise. Illegal_Instruction() matches
     // this same instruction's own existing convention for its other
     // real failure mode (privilege), just above.
-    if old_entry.retired then Illegal_Instruction()
+    // ═══ R66 -- THE RETIREMENT LANDS ONE POPULATE TOO LATE ═══
+    //
+    // `retired` is computed from the OLD generation, so a slot at
+    // {valid, 0xfffffe} takes a Populate that saturates it to 0xffffff and
+    // leaves retired STILL FALSE. The NEXT Populate then passes this gate,
+    // cannot bump (saturating no-op), and writes a second incarnation at the
+    // SAME generation -- while the first incarnation's capabilities are live
+    // and carry that generation. The dereference's only temporal arm is
+    // `not(entry.valid) | entry.generation != cap.generation`; valid is true
+    // and the generations match, so it passes, and the address is formed from
+    // the capability's CACHED Base. `retired` is read by no dereference arm on
+    // either layer.
+    //
+    // MEASURED on the shipped model, over the seeded 0xFFFFFE fixture:
+    //   populate #1 at arena1  -> accepted
+    //   bind, ocs.d 0xABCD     -> written into arena1
+    //   populate #2 at arena2  -> ACCEPTED
+    //   ocl.d through the OLD capability -> 0xABCD, from arena1
+    // arena2 stayed zero. Two incarnations, one generation, and the first one
+    // still reaching the frame the descriptor has abandoned.
+    //
+    // THE SOURCE ALREADY KNEW. Page-out's comment says of this exact state:
+    // "That state is genuinely reachable, not theoretical ... So `retired` does
+    // not intercept it", and page-out FAILS CLOSED on it with the principle
+    // "if the invalidation mechanism cannot run, the operation that depends on
+    // it must not proceed." Populate depends on the bump to invalidate the
+    // previous incarnation. When the bump cannot run, Populate must not either.
+    // The defence was written for the instruction that OBSERVES the state and
+    // not for the one that CREATES it.
+    //
+    // veda_types.sail says the intent outright -- "once generation WOULD WRAP,
+    // the slot is permanently retired instead." This restores that sentence:
+    // the refusal now lands on the Populate that cannot deliver a fresh
+    // generation, rather than one Populate later.
+    if old_entry.retired | (old_entry.valid & old_entry.generation == 0xffffff) then Illegal_Instruction()
     else {
       // A slot being repopulated while still `valid` bumps generation too
       // (not just Destroy) -- the ODT's own real security property (a
@@ -1000,7 +1034,8 @@ function clause execute VEDA_ODT_POPULATE_FAST(rs2, rs1, rd) = {
     if veda_oda_denies(base, veda_attr[55 .. 16])
        | (old_entry.valid & veda_oda_denies(old_entry.Base, old_entry.Length)) then Illegal_Instruction()
     else
-    if old_entry.retired then Illegal_Instruction()
+    // R66: same rule, same reason -- see VEDA_ODT_POPULATE above.
+    if old_entry.retired | (old_entry.valid & old_entry.generation == 0xffffff) then Illegal_Instruction()
     else {
       let new_generation : bits(24) =
         if old_entry.valid then (if old_entry.generation == 0xffffff then 0xffffff else old_entry.generation + 1)
