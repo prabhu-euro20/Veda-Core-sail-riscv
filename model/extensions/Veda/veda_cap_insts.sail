@@ -903,6 +903,11 @@ function clause execute VEDA_OCRETURN(rs1) = {
     // OCInvoke does on the way in -- return is a real compartment-boundary
     // crossing (the SSC clear below already records that lesson).
     veda_crbr_load((cs1.Object_ID)[43 .. 24]);
+    // D5: and release the saved shadow the trap entry left behind. The region
+    // has just been installed from cs1 on the line above, so a saved one is
+    // superseded; leaving it would hand the next xret -- taken by anyone, for
+    // anything -- a stale region to install. See veda_crbr_release.
+    veda_crbr_release();
     // SSC: clear on every successful return too, the identical reason and
     // identical mechanism as VEDA_OCINVOKE above -- OCRETURN is a real,
     // general compartment-boundary crossing (not only used inside the

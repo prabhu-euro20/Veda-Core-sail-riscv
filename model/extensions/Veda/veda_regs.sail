@@ -227,6 +227,7 @@ val veda_trap_level_has_context : unit -> bool
 val veda_trap_frame_abandon : unit -> unit
 val veda_crbr_save_and_reset : unit -> unit
 val veda_crbr_restore_on_xret : unit -> unit
+val veda_crbr_release : unit -> unit
 
 function veda_pcc_save_and_reset() -> unit = {
   // R12. Capture ONLY on the outermost trap. At depth > 0 an outer save is
@@ -1046,6 +1047,30 @@ function veda_crbr_restore_on_xret() -> unit = {
     veda_saved_region      = VEDA_REGION_NONE;
     veda_saved_region_base = zeros();
   }
+}
+
+// D5: the OTHER end of the same slot. veda_crbr_restore_on_xret above is the
+// xret consumer; this is the consumer for the architecture's SECOND exit from
+// a trap handler. Without it the shadow is released by NO exit OCRETURN takes,
+// and since the restore above fires on the sentinel ALONE -- no depth term, no
+// owner term, deliberately outside the mepcc depth guard -- a stranded shadow
+// is installed by the NEXT xret the machine executes, whoever executes it and
+// for whatever unrelated reason. Measured before it was fixed: a region-1
+// compartment traps, the handler leaves by OCRETURN, and an ordinary region-0
+// ecall/mret pair several instructions later comes back running in region 1.
+//
+// Placed on the CRBR side and made UNCONDITIONAL rather than folded into
+// veda_trap_frame_abandon's depth-zero guard, for two reasons. First the
+// justification is supersession by the operand -- OCRETURN calls
+// veda_crbr_load and installs the region from cs1, so any saved region is
+// superseded by definition, exactly the argument veda_trap_frame_abandon's
+// own comment already makes for PCC -- and that argument does not depend on
+// the depth bookkeeping being right. Second it keeps the two disciplines
+// individually self-consuming, which is the property the restore above is
+// deliberately written to preserve.
+function veda_crbr_release() -> unit = {
+  veda_saved_region      = VEDA_REGION_NONE;
+  veda_saved_region_base = zeros();
 }
 
 // R10: the read-only CRBR observability CSR bodies, placed here (not up
