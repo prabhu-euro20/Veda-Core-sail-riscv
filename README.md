@@ -1,3 +1,25 @@
+> ## FORK NOTICE -- this is not upstream
+>
+> **This is a fork of the RISC-V International Sail model, and everything below this box is
+> upstream's own README, left untouched.** What makes it a fork was invisible from this page.
+>
+> The fork adds **Veda-Core**, an object-centric, address-less, capability-based extension, under
+> `model/extensions/Veda/`. It introduces a 256-bit capability, an Object Descriptor Table that
+> serves as the memory manager (no page tables, no TLB, no `satp`), object residency and paging,
+> object-granular copy-on-write, and sealed-capability compartments. Upstream files are modified
+> only where the extension has to hook in.
+>
+> - **Design and findings register:** `veda-core-linux` -- `design/DESIGN_00..08` and
+>   `design/DESIGN_07_ROBUSTNESS_AND_SECURITY_HARDENING.md`, which runs R1..R43.
+> - **Hardware implementation and its differential harness:** `veda-core-sindhu`.
+> - **Self-check corpus for the extension:** `sail_tests/vc_*.S` in `veda-core-sindhu`, currently
+>   **102/102**. The model is also compared against the independent RTL implementation probe by
+>   probe, **20/20 as expected**.
+>
+> The Sail model is the **specification layer** for this project: every Veda-Core increment lands
+> here first, and the hardware mirrors it. Several defects were found only because the two exist
+> and disagree.
+
 # Formal Specification of the RISC-V ISA
 
 This repository contains a formal specification of the RISC-V architecture, written in
