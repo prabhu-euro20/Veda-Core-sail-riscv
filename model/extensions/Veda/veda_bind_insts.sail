@@ -183,9 +183,41 @@ mapping encdec_veda_bind_mode : veda_bind_mode <-> bits(2) = {
 
 union clause instruction = VEDA_BINDINST : (bits(2), regidx, vcapidx)
 
+// A-3 / R44: `mode != 0b11` IS PART OF THE DECODE, not a check inside execute.
+//
+// Mode 0b11 is VEDA_BIND_RESERVED -- an encoding the architecture has never
+// allocated. It used to decode as a VEDA_BINDINST and then be refused by the
+// `VEDA_BIND_RESERVED => Illegal_Instruction()` arm at the BOTTOM of the execute
+// clause, which meant it first had to survive three state-dependent traps:
+// region residency, the per-object domain gate, and object residency. So the
+// refusal CAUSE for an unallocated encoding became a function of ODT and region
+// state the instruction was never entitled to consult:
+//
+//     veda.bind mode 0b11 against a non-resident region -> REGION_FAULT  0x09
+//     ... against an object owned by another domain     -> DOMAIN_VIOLATION 0x0B
+//     ... against a valid but paged-out object          -> RESIDENCY_FAULT 0x0A
+//     ... otherwise                                     -> Illegal_Instruction
+//
+// TWO THINGS WERE WRONG WITH THAT. It is a real divergence -- the RTL leaves mode
+// 0b11 out of $veda_decoded entirely and refuses it at DECODE, so it reports
+// Illegal_Instruction unconditionally and its three fault signals are gated on the
+// three real modes only. And it is a small ODT ORACLE: unprivileged code can issue
+// reserved-mode binds and learn, from the cause alone, whether a region is
+// resident or whether a domain matches, about objects it has no right to.
+//
+// The guard here is the fix, and it ADDS NO MECHANISM. With mode 0b11 excluded
+// from the encdec clause the instruction simply does not decode, and the model's
+// own wildcard clause catches it -- `mapping clause encdec = ILLEGAL(s) <-> s` in
+// postlude/insts_end.sail, whose own header states the rule R30 already cited:
+// "the encdec mapping must come last to ensure that all unmatched encodings decode
+// to an illegal instruction". An unallocated encoding is now refused by the same
+// general mechanism as every other unallocated encoding, rather than by a
+// hand-written arm that ran too late.
+//
+// Measured before and after: difftest/probes/p19_bind_reserved_mode.S.
 mapping clause encdec = VEDA_BINDINST(mode, rs1, rd)
   <-> 0b0000000000 @ mode @ encdec_reg(rs1) @ 0b101 @ 0b0 @ encdec_vcap(rd) @ 0b0001011
-  when currentlyEnabled(Ext_Veda)
+  when currentlyEnabled(Ext_Veda) & mode != 0b11
 
 function clause execute VEDA_BINDINST(mode_bits, rs1, rd) = {
   let mode = encdec_veda_bind_mode(mode_bits);
@@ -286,6 +318,11 @@ function clause execute VEDA_BINDINST(mode_bits, rs1, rd) = {
   else
 
   match mode {
+    // UNREACHABLE BY CONSTRUCTION as of R44, and kept because Sail requires the
+    // match to be exhaustive. The encdec guard above stops mode 0b11 decoding at
+    // all, so control never arrives here -- which is the point: the refusal now
+    // happens before any ODT or region state is consulted. If this arm ever fires
+    // again, the guard has been lost.
     VEDA_BIND_RESERVED => Illegal_Instruction(),
 
     VEDA_REBIND => {
