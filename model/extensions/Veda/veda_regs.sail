@@ -64,7 +64,8 @@ register veda_tsc_tag : bool
 // of raw sd/ld (which Milestone 19's purecap rule unconditionally traps
 // inside a live compartment -- TOOLCHAIN_MILESTONE_10_RESULTS.md's own
 // major finding). Deliberately NOT persistent-and-OCInvoke/OCRETURN
-// -transparent like veda_oda/veda_tsc above: VEDA_OCINVOKE and
+// -transparent like veda_tsc above (and like veda_oda WAS, until R48 -- see
+// below): VEDA_OCINVOKE and
 // VEDA_OCRETURN (veda_cap_insts.sail) both clear (untag) this register on
 // every successful compartment-boundary crossing -- a real, necessary
 // asymmetry from ODA/TSC found by an independent design review before any
@@ -73,6 +74,29 @@ register veda_tsc_tag : bool
 // read/write access to the caller's entire stack region). The entered
 // compartment re-establishes its own SSC via an explicit OSpecialRW, the
 // identical already-established pattern ODA/TSC themselves use.
+//
+// ═══ R48/R49 CORRECTION -- THAT LAST SENTENCE IS FALSE BELOW MACHINE ══════
+// VEDA_OSPECIALRW is gated `if cur_privilege != Machine then
+// Illegal_Instruction()` -- for READ and WRITE, on all three SCRs, on both
+// layers (RTL: `$veda_ospecialrw_violation = $is_veda_ospecialrw && !$priv`).
+// So a User compartment CANNOT re-establish its own SSC, and a User
+// compartment is precisely the principal this mechanism exists for. MEASURED:
+// inside a User, PCC-bounded compartment an ordinary `sd` traps (the purecap
+// rule, which is the reason the SSC exists at all) AND an `ospecialrw SSC`
+// traps (privilege).
+//
+// The honest residual, also measured, because the first version of this note
+// overstated it: the compartment is NOT unable to spill -- an OCS.D through
+// the IDC that OCInvoke installed works, and added no trap. What is true is
+// narrower: the SSC mechanism has NO REACHABLE USER in the privilege
+// configuration this design actually ships. Redundant-and-unusable below
+// Machine, not load-bearing-and-broken.
+//
+// R48 inherits the same false recovery story for the ODA, and there it costs
+// availability rather than nothing: a User caller that crosses loses its ODA
+// and must trap to Machine to be re-delegated one. Stated rather than hidden,
+// and it is why the designed successor is a monotone delegated handoff at the
+// crossing (see VEDA_OCINVOKE) rather than relaxing OSpecialRW's gate.
 register veda_ssc : capability
 register veda_ssc_tag : bool
 

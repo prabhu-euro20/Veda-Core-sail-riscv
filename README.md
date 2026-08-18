@@ -10,10 +10,10 @@
 > only where the extension has to hook in.
 >
 > - **Design and findings register:** `veda-core-linux` -- `design/DESIGN_00..08` and
->   `design/DESIGN_07_ROBUSTNESS_AND_SECURITY_HARDENING.md`, which runs R1..R47.
+>   `design/DESIGN_07_ROBUSTNESS_AND_SECURITY_HARDENING.md`, which runs R1..R51.
 > - **Hardware implementation and its differential harness:** `veda-core-sindhu`.
 > - **Self-check corpus for the extension:** `sail_tests/vc_*.S` in `veda-core-sindhu`, currently
->   **104/104**. The model is also compared against the independent RTL implementation probe by
+>   **105/105**. The model is also compared against the independent RTL implementation probe by
 >   probe, **22/22 as expected**.
 >
 > The Sail model is the **specification layer** for this project: every Veda-Core increment lands

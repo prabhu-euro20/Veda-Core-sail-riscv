@@ -630,12 +630,73 @@ function clause execute VEDA_OCINVOKE(rs2, rs1) = {
     // -- any OCL.D/OCS.D against an untagged capability already hard-traps
     // regardless of the stale bits underneath. The entered compartment is
     // responsible for establishing its own SSC via an explicit
-    // OSpecialRW, the identical already-established pattern ODA/TSC
+    // OSpecialRW -- WHICH R48/R49 MEASURED TO BE IMPOSSIBLE BELOW MACHINE,
+    // OSpecialRW being Machine-only for read AND write of all three SCRs; see
+    // veda_regs.sail's SSC block for the correction and its measured residual
+    // -- the identical already-established pattern ODA/TSC
     // themselves use -- no new operand, no encoding change, symmetric
     // with the identical clear this milestone also adds to OCRETURN
     // below (return is a real compartment-boundary crossing too; the
     // same leak class applies in that direction as well).
     veda_ssc_tag = false;
+    // ═══ R48 -- AND THE ODA HAD TO JOIN IT, FOR THE ARGUMENT WRITTEN ABOVE ══
+    //
+    // The comment on the SSC clear directly above names ODA/TSC's own
+    // "untouched by OCInvoke" convention as the thing an SSC must NOT follow,
+    // because a callee would inherit the caller's whole stack region. That
+    // argument was never turned back on the ODA itself.
+    //
+    // WHILE THE ODA WAS UNSCOPED (pre-R47) THE POINT WAS MOOT -- the ODA
+    // reached all of memory from anywhere, so a crossing changed nothing. R47
+    // gave it a window. Inheriting it then means inheriting MINT AUTHORITY
+    // OVER THE CALLER'S WINDOW, and that is what was measured:
+    // sail_tests/vc_r48_oda_inherit_neg.S entered a User compartment holding
+    // nothing but a code and a data capability, and it DESTROYED the caller's
+    // object and MINTED a fresh descriptor over the caller's window --
+    // ZERO TRAPS, mcause 0x00.
+    //
+    // AND THE CALLER CANNOT DEFEND ITSELF. VEDA_OSPECIALRW below is
+    // Machine-only for read AND write of all three SCRs, so a User caller
+    // holding a delegated ODA has no instruction with which to drop it before
+    // calling. There is no software discipline to fall back on; the hardware
+    // is the only place this can close.
+    //
+    // TAG ONLY, NEVER THE VALUE -- the identical discipline as the SSC clear
+    // above, and for the identical reason: every consumer goes through
+    // veda_oda_authorized(), whose first term is the tag.
+    //
+    // WHAT THIS DELIBERATELY DOES NOT DO, so that the absences are on the
+    // record rather than discovered later:
+    //   * The TSC is NOT cleared. It has ZERO consumers on either layer --
+    //     no instruction's behaviour changes because the TSC is tagged --
+    //     so clearing it closes nothing, while the shipped switcher
+    //     (runtime/veda_sched_asm.S) installs the TSC one instruction before
+    //     entering a thread through OCRETURN. Clearing would falsify that
+    //     documented contract while every round-trip assertion stayed green,
+    //     because they read the value field and never the tag. The TSC's
+    //     boundary semantics belong to the increment that gives it a consumer.
+    //   * `mret` is NOT touched, and it IS a fourth compartment entry
+    //     (veda_pcc_restore_on_xret installs PCC and the CRBR pair). It is
+    //     also the ONLY instruction that lowers privilege, and therefore the
+    //     sole vehicle by which a Machine domain delegates an ODA downward at
+    //     all. Clearing there would delete the delegated half of all seven
+    //     ODA-gated instructions. Stated here because "applied to four of five
+    //     arms" is a shape this project has been bitten by five times.
+    //   * OCJALR is NOT touched: it does not cross a compartment boundary
+    //     (Milestone 22), installs no PCC and no CRBR, and adding a clear
+    //     there would be new policy rather than a mirror.
+    //
+    // THE DESIGNED SUCCESSOR, recorded so this is not mistaken for the end
+    // state: a monotone DELEGATED HANDOFF -- OCInvoke installs the ODA from
+    // the data capability cs2 when cs2 carries PERM_ACCESS_SYSTEM_REGISTERS
+    // and lies inside the caller's own ODA window, and clears it otherwise.
+    // That design's default branch IS this line, so shipping the clear now is
+    // a strict prefix of it and nothing is discarded. It cannot land yet: it
+    // needs a sweep proving no existing cs2 carries bit 7 (which would
+    // silently GAIN an ODA), and its ordering against the R10 region check
+    // and the R11 code-object check has to be settled first, because both
+    // must fault before any commit.
+    veda_oda_tag = false;
     let target : xlenbits = veda_to_xlen(zero_extend(cs1.Base) + zero_extend(cs1.Offset));
     jump_to([target with 0 = bitzero])
     }
@@ -839,6 +900,15 @@ function clause execute VEDA_OCRETURN(rs1) = {
     // scheduler's own switcher pattern), so the same hardware guarantee
     // must hold unconditionally here as well, not just on the call side.
     veda_ssc_tag = false;
+    // R48: the ODA clear applies on the way OUT too, and on this machine that
+    // is not the "returning to a more-trusted caller" direction people assume.
+    // The shipped switcher (runtime/veda_sched_asm.S) enters threads DOWNWARD
+    // through OCRETURN -- a thread is resumed by an OCA + CSealEntry + OCRETURN
+    // sequence, never by OCInvoke -- and CSealEntry mints sentries with no
+    // authorizing operand and no privilege gate. An OCInvoke-only clear would
+    // therefore leave the project's own primary domain-entry path wide open,
+    // which is exactly the conclusion the SSC design reached for itself.
+    veda_oda_tag = false;
     // R12: a return through the switcher may be leaving a trap handler,
     // and it is the architecture's second exit from one. PCC has just been
     // installed from cs1, so any saved frame is superseded -- abandon it
