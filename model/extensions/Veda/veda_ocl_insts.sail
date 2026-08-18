@@ -905,7 +905,7 @@ function clause execute VEDA_ODT_DESTROY(rs1, rd) = {
       // something that was deliberately revoked. Set for state hygiene, so
       // no path can ever read a stale `resident = true` off a dead slot.
       resident   = false,
-      owner_domain = veda_creating_domain(),   // R52 experiment
+      owner_domain = VEDA_DOMAIN_ANY,   // R41: a destroyed slot has NO owner
       cow = false,
     });
     X(rd) = zeros();
@@ -1024,7 +1024,7 @@ function clause execute VEDA_ODT_POPULATE_FAST(rs2, rs1, rd) = {
         // old value over would leave a just-populated object faulting
         // forever, which is why this is spelled out rather than inherited.
         resident   = true,
-        owner_domain = VEDA_DOMAIN_ANY,
+        owner_domain = veda_creating_domain(),   // R52: same rule as plain Populate
         cow = false,
       });
       X(rd) = zeros();
