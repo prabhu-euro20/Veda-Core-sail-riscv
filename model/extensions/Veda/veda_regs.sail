@@ -913,6 +913,55 @@ function veda_region_rt_resident(region : bits(20)) -> bool = {
   else veda_region_table[ru].rt_valid & veda_region_table[ru].region_resident
 }
 
+// R62 (D6): may this domain be NAMED as an object's owner? Region IS the domain
+// (R10), so naming a domain means naming a region, and a region that has never
+// been configured is not a principal -- it is a principal that does not exist
+// yet.
+//
+// veda.odt.set.domain took its value straight from rs2[19..0] and wrote it with
+// no validation of any kind. The refusal this mirrors is already in that same
+// function, three lines above, written for the object half: a policy on a slot
+// that holds nothing is refused because "allowing it would let software
+// pre-stage rules on slots it does not own yet, to take effect when someone
+// else populates them." The identical argument for the DOMAIN half was never
+// applied, and it is the stronger of the two: a policy naming a region that
+// does not exist yet takes effect when someone else is GIVEN that region, so
+// it is authority that OUTLIVES ITS AUTHOR. An early-boot component with a
+// delegated ODA can stamp a future principal and then be dismissed; dropping
+// its ODA does not unstamp anything.
+//
+// Checked at WRITE time, not at read time, and the difference is the whole
+// finding. A read-time check in veda_bind_domain_ok makes the object unbindable
+// while the region is unconfigured and bindable the moment it is configured --
+// which is precisely the attack, arriving on schedule. Only refusing the write
+// stops the stamp from being applied at all.
+//
+// VEDA_DOMAIN_ANY is exempt because it is not a principal: it is the absence of
+// a restriction, and it is what R41 and R58 reset the field to.
+//
+// NOT exempt for Machine, deliberately, and this is the one place the choice is
+// arguable. R47's veda_oda_denies exempts Machine because that is an AUTHORITY
+// question and Machine holds all authority. This is a WELL-FORMEDNESS question,
+// like the valid check beside it -- which does not exempt Machine either -- and
+// the ordering it imposes on a loader (configure a region before assigning
+// objects to it) is one line of sequencing, not a capability anyone loses.
+//
+// RESIDUAL, STATED AND NOT CLOSED: this stops a policy naming a region that has
+// never existed. It does NOT stop one naming a region that existed, was torn
+// down, and was re-issued to a different principal -- the region-level twin of
+// the object generation counter. region_generation is already in the region
+// table and is the mechanism that would close it, but owner_domain has 20 bits
+// and no room to carry one, so it needs a field change rather than a check.
+// Recorded as UNMEASURED; no RT-teardown instruction exists yet to reach it.
+function veda_domain_nameable(domain : bits(20)) -> bool = {
+  if domain == VEDA_DOMAIN_ANY then true
+  else {
+    let du = unsigned(domain);
+    if du >= VEDA_REGION_MODELED then false
+    else veda_region_table[du].rt_valid
+  }
+}
+
 // R10: the validated CRBR load. Caller must have already checked
 // veda_region_rt_resident (the two crossings trap with REGION_FAULT before
 // calling this); the assert re-establishes the in-bounds fact across that

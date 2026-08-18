@@ -1160,6 +1160,16 @@ function clause execute VEDA_ODT_SET_DOMAIN(rs2, rs1, rd) = {
     // meaningless, and allowing it would let software pre-stage rules on slots
     // it does not own yet, to take effect when someone else populates them.
     if not(old_entry.valid) then Illegal_Instruction()
+    else
+    // R62 (D6): and refuse a policy naming a PRINCIPAL that does not exist --
+    // the identical argument, applied to the other half of this instruction.
+    // A domain is a region (R10); an unconfigured region is a principal that
+    // has not been created yet, so a policy naming one takes effect when
+    // someone else is GIVEN that region. That is authority outliving its
+    // author, and dropping the author's ODA does not undo it. See
+    // veda_domain_nameable for why this must be a WRITE-time refusal: a
+    // read-time check would simply make the stamp arrive on schedule.
+    if not(veda_domain_nameable(new_domain)) then Illegal_Instruction()
     else {
       odt_write(object_id, struct {
         // EVERYTHING except owner_domain is copied verbatim. In particular the
