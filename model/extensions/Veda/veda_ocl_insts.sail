@@ -704,6 +704,18 @@ function veda_oda_covers(base : bits(56), length : bits(40)) -> bool = {
 function veda_oda_denies(base : bits(56), length : bits(40)) -> bool =
   (cur_privilege != Machine) & not(veda_oda_covers(base, length))
 
+// ═══ R52 EXPERIMENT -- the creation-time binding policy ════════════════════
+// An object created INSIDE a compartment belongs to that compartment's domain;
+// an object created in the ambient context (no compartment) stays open. The
+// ambient arm is what keeps R17's livelock closed: the retracted R17 forbade
+// cross-domain Bind outright and made compartments one-way, because a
+// compartment's RETURN PATH is by construction in another domain. Here the boot
+// context's objects -- which is where return paths and type authorities are
+// built -- stay VEDA_DOMAIN_ANY and remain bindable from anywhere.
+function veda_creating_domain() -> bits(20) =
+  if veda_pcc_object == VEDA_OBJECT_NONE then VEDA_DOMAIN_ANY
+  else (veda_pcc_object)[43 .. 24]
+
 function clause execute VEDA_ODT_POPULATE(rs2, rs1, rd) = {
   if not(cur_privilege == Machine | veda_oda_authorized()) then Illegal_Instruction()
   else {
@@ -823,7 +835,7 @@ function clause execute VEDA_ODT_POPULATE(rs2, rs1, rd) = {
         // Found by an adversarial pass reading both layers after R38 landed. No
         // probe composed Populate with set.cow, which is why a divergence in two
         // policy fields survived in the differential suite.
-        owner_domain = VEDA_DOMAIN_ANY,
+        owner_domain = veda_creating_domain(),   // R52 experiment
         cow = false,
       });
       X(rd) = zeros();
@@ -893,7 +905,7 @@ function clause execute VEDA_ODT_DESTROY(rs1, rd) = {
       // something that was deliberately revoked. Set for state hygiene, so
       // no path can ever read a stale `resident = true` off a dead slot.
       resident   = false,
-      owner_domain = VEDA_DOMAIN_ANY,
+      owner_domain = veda_creating_domain(),   // R52 experiment
       cow = false,
     });
     X(rd) = zeros();

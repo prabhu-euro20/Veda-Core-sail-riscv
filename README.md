@@ -13,7 +13,7 @@
 >   `design/DESIGN_07_ROBUSTNESS_AND_SECURITY_HARDENING.md`, which runs R1..R56.
 > - **Hardware implementation and its differential harness:** `veda-core-sindhu`.
 > - **Self-check corpus for the extension:** `sail_tests/vc_*.S` in `veda-core-sindhu`, currently
->   **107/107**. The model is also compared against the independent RTL implementation probe by
+>   **108/108**. The model is also compared against the independent RTL implementation probe by
 >   probe, **25/25 as expected**.
 >
 > The Sail model is the **specification layer** for this project: every Veda-Core increment lands
