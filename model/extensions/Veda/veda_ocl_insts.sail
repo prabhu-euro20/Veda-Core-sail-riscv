@@ -740,7 +740,9 @@ function clause execute VEDA_ODT_POPULATE(rs2, rs1, rd) = {
     // page-out. Page-in is deliberately NOT in it: it already refuses
     // unless the object is non-resident, and an executing object is
     // necessarily resident.
-    if veda_object_is_executing(object_id) then Illegal_Instruction()
+    // R63: the region named must be a region that EXISTS -- and it must be a
+    // REFUSAL, not the silent no-op a gated odt_write would be.
+    if not(veda_region_nameable(object_id)) | veda_object_is_executing(object_id) then Illegal_Instruction()
     else {
     let descriptor : bits(64) = zero_extend(X(rs2));
     let old_entry = odt_lookup(object_id);
@@ -869,7 +871,9 @@ function clause execute VEDA_ODT_DESTROY(rs1, rd) = {
     // page another core is running from without interrupting it, and it is
     // preferred here over the alternative, which is letting the other hart
     // keep executing freed memory.
-    if veda_object_is_executing(object_id) then Illegal_Instruction()
+    // R63: the region named must be a region that EXISTS -- and it must be a
+    // REFUSAL, not the silent no-op a gated odt_write would be.
+    if not(veda_region_nameable(object_id)) | veda_object_is_executing(object_id) then Illegal_Instruction()
     else {
     let old_entry = odt_lookup(object_id);
     // R47: deliberately NOT gated on `old_entry.valid`, unlike Populate above.
@@ -977,7 +981,9 @@ function clause execute VEDA_ODT_POPULATE_FAST(rs2, rs1, rd) = {
     // page-out. Page-in is deliberately NOT in it: it already refuses
     // unless the object is non-resident, and an executing object is
     // necessarily resident.
-    if veda_object_is_executing(object_id) then Illegal_Instruction()
+    // R63: the region named must be a region that EXISTS -- and it must be a
+    // REFUSAL, not the silent no-op a gated odt_write would be.
+    if not(veda_region_nameable(object_id)) | veda_object_is_executing(object_id) then Illegal_Instruction()
     else {
     // Increment 3: Base is taken at its full 56-bit width from the GPR --
     // this is the WIDE populate path. Sliced out of an explicit 64-bit
@@ -1110,7 +1116,9 @@ function clause execute VEDA_ODT_SET_COW(rs2, rs1, rd) = {
     let old_entry = odt_lookup(object_id);
     // R47: a policy write is authority over the descriptor, and so it needs
     // authority over the memory that descriptor names.
-    if veda_oda_denies(old_entry.Base, old_entry.Length) then Illegal_Instruction()
+    // R63: the region named must be a region that EXISTS -- and it must be a
+    // REFUSAL, not the silent no-op a gated odt_write would be.
+    if not(veda_region_nameable(object_id)) | veda_oda_denies(old_entry.Base, old_entry.Length) then Illegal_Instruction()
     else
     if not(old_entry.valid) then Illegal_Instruction()
     else {
@@ -1154,7 +1162,9 @@ function clause execute VEDA_ODT_SET_DOMAIN(rs2, rs1, rd) = {
     let old_entry = odt_lookup(object_id);
     // R47: a policy write is authority over the descriptor, and so it needs
     // authority over the memory that descriptor names.
-    if veda_oda_denies(old_entry.Base, old_entry.Length) then Illegal_Instruction()
+    // R63: the region named must be a region that EXISTS -- and it must be a
+    // REFUSAL, not the silent no-op a gated odt_write would be.
+    if not(veda_region_nameable(object_id)) | veda_oda_denies(old_entry.Base, old_entry.Length) then Illegal_Instruction()
     else
     // Refuse on a slot that holds nothing: a policy on a non-existent object is
     // meaningless, and allowing it would let software pre-stage rules on slots
@@ -1240,7 +1250,9 @@ function clause execute VEDA_ODT_PAGE_OUT(rs1, rd) = {
     // R47: eviction is authority over the object. It reads above the executing
     // pin here only in source order -- both refuse with Illegal_Instruction, so
     // neither can be used to probe past the other.
-    if veda_oda_denies(old_entry.Base, old_entry.Length) then Illegal_Instruction()
+    // R63: the region named must be a region that EXISTS -- and it must be a
+    // REFUSAL, not the silent no-op a gated odt_write would be.
+    if not(veda_region_nameable(object_id)) | veda_oda_denies(old_entry.Base, old_entry.Length) then Illegal_Instruction()
     else
     // Only a live, resident object can be paged out. A non-existent one has
     // nothing to evict; an already-paged-out one would bump generation a
@@ -1375,7 +1387,9 @@ function clause execute VEDA_ODT_PAGE_IN(rs2, rs1, rd) = {
     if veda_oda_denies(old_entry.Base, old_entry.Length)
        | veda_oda_denies(base, old_entry.Length) then Illegal_Instruction()
     else
-    if not(old_entry.valid) | old_entry.resident then Illegal_Instruction()
+    // R63: the region named must be a region that EXISTS -- and it must be a
+    // REFUSAL, not the silent no-op a gated odt_write would be.
+    if not(veda_region_nameable(object_id)) | not(old_entry.valid) | old_entry.resident then Illegal_Instruction()
     else {
       odt_write(object_id, struct {
         valid      = true,

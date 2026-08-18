@@ -1184,13 +1184,82 @@ function veda_region_is_resident(region : bits(20)) -> bool = {
 // either falls outside its modeled window. Bounding BOTH region and local is
 // what guarantees global uniqueness -- a local that overflowed its window
 // would otherwise alias the next region's slots.
+// R63, the WRITE-side half. veda_odt_index below makes RESOLUTION fail closed,
+// which is the right backstop but is NOT a refusal: odt_write's None() arm is
+// `()`, so a gated write becomes a SILENT NO-OP -- the instruction retires
+// reporting success and nothing happened. That is exactly R14's class ("Populate
+// and Destroy refused SILENTLY -- the RTL never told anyone"), and it was
+// measured on the first attempt at this fix: the populate did not trap, the test
+// failed, and the trace showed the instruction retiring normally.
+//
+// So every ODT WRITER also asks this question directly and raises
+// Illegal_Instruction. Illegal_Instruction rather than a REGION_FAULT via
+// veda_trap, for a concrete reason: veda_trap packs a CAPABILITY index into
+// mtval, and these instructions' rd is a plain GPR, so the cause byte would
+// arrive with a meaningless register field. Every other refusal these seven
+// instructions raise is already Illegal_Instruction, so this keeps one shape.
+function veda_region_nameable(object_id : bits(44)) -> bool = {
+  let region = object_id[43 .. 24];
+  if region == veda_current_region then true
+  else {
+    let ru = unsigned(region);
+    if ru >= VEDA_REGION_MODELED then false
+    else veda_region_table[ru].rt_valid
+  }
+}
+
+// ═══ R63 -- THE REGION HALF WAS AN IDENTITY AT BIND AND A BARE INDEX HERE ═══
+//
+// R10 states that the region field of an Object_ID is "the unforgeable domain
+// identity". R55 made that true on the READ path: veda.bind checks
+// veda_region_is_resident (rt_valid & region_resident) before it looks anything
+// up. Nothing made it true on the WRITE path. VEDA_ODT_POPULATE's gates are
+// Machine-or-ODA, the executing pin, the ODA window and `retired` -- and not one
+// of them reads either RT bit -- so this function resolved ANY in-window region
+// number, configured or not, straight through veda_odt_base_of.
+//
+// MEASURED, before the fix, on the shipped model:
+//   populate {region 5, local 300}  ->  0 traps, ACCEPTED
+//   bind     {region 0, local 300}  ->  tag 1, CGetBase = the prober's arena
+//   bind     {region 5, local 300}  ->  trap, cause 0x09 REGION_FAULT
+// An actor wrote a live descriptor under a name the machine then refused to let
+// it read, and the descriptor landed in region 0's namespace. Regions 4..7 are
+// seeded region_odt_base = 0, which is region 0's base, so `local` alone picked
+// the slot.
+//
+// THIS CORRECTS R56. R56 recorded the aliasing but named the barrier as
+// `rt_resident[4] == false` and concluded the escape needed a future RT-Populate
+// to set that bit. The Populate path reads neither RT bit, so no new instruction
+// was ever required -- it was reachable with the shipped instruction set. R56's
+// CONCLUSION (do not build a naive RT-Populate) stands; its MECHANISM did not.
+//
+// NOT an authority escalation, stated plainly: every ODT writer is already
+// bounded by the ODA window (R47), and an actor that can write {5, L} can write
+// {0, L} with the identical check, so it gains no memory it did not have. What
+// it breaks is NAMESPACE INTEGRITY -- one slot with several legitimate-looking
+// names, and the two halves of the architecture disagreeing about whether the
+// region field means anything.
+//
+// The gate goes HERE rather than in each writer because this is the single
+// choke point every ODT access of either direction passes through -- one gate,
+// all paths, which is the hardware-native answer. The current-region fast path
+// is deliberately untouched: a crossing has already validated it (R10/R55), so
+// re-reading the RT for it would be both redundant and, per veda_crbr_load's own
+// comment, circular. Bind's tested causes are preserved because bind faults on
+// veda_region_is_resident BEFORE it calls odt_lookup -- verified at source, not
+// assumed.
 function veda_odt_index(object_id : bits(44)) -> option(int) = {
   let region = object_id[43 .. 24];
   let local  = object_id[23 .. 0];
   let ru = unsigned(region);
   let lu = unsigned(local);
-  if (region != veda_current_region & ru >= VEDA_REGION_MODELED) | lu >= VEDA_LOCAL_MODELED
-  then None()
+  if lu >= VEDA_LOCAL_MODELED then None()
+  else if region == veda_current_region then {
+    let idx = unsigned(veda_odt_base_of(region)) + lu;
+    if idx < VEDA_ODT_MODELED_ENTRIES then Some(idx) else None()
+  }
+  else if ru >= VEDA_REGION_MODELED then None()
+  else if not(veda_region_table[ru].rt_valid) then None()
   else {
     let idx = unsigned(veda_odt_base_of(region)) + lu;
     if idx < VEDA_ODT_MODELED_ENTRIES then Some(idx) else None()
