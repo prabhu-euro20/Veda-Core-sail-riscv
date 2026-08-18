@@ -1114,6 +1114,48 @@ function clause execute VEDA_ODT_PAGE_OUT(rs1, rd) = {
     // so no future relaxation of the residency gates below can open this.
     if veda_object_is_executing(object_id) then Illegal_Instruction()
     else if not(old_entry.valid) | not(old_entry.resident) then Illegal_Instruction()
+    // ═══ R38(b) -- A COPY-ON-WRITE OBJECT IS NOT PAGEABLE ═══
+    //
+    // R38 made the copy-on-write split right belong to whoever held PERM_STORE at
+    // the moment the object became copy-on-write. Because set.cow deliberately
+    // does not bump the generation, that entitlement lives in exactly one place:
+    // the live capability registers that predate it.
+    //
+    // THIS INSTRUCTION EXISTS TO DESTROY EXACTLY THOSE. It bumps the generation --
+    // that is what invalidates outstanding capabilities and it is necessary,
+    // because every capability caches its own Base and page-in supplies a new one.
+    // It also carries `cow` across untouched. So one paging round trip left an
+    // object that NOBODY could split: every pre-cow capability stale, the entry
+    // still copy-on-write, and the only way back in a Bind that masks store off.
+    // Measured, not argued: sail_tests/vc_r38_cow_paging_lockout.S.
+    //
+    // AND THE "RECOVERY" THAT LOOKED AVAILABLE IS UNSAFE. An earlier draft of that
+    // test recorded "privileged software can still release the object by clearing
+    // cow" as the escape hatch. It is not one: clearing `cow` on a genuinely
+    // shared object lets EVERY sharer write THE SAME object, which is precisely
+    // the isolation copy-on-write was providing. A recovery that silently merges
+    // two writers is worse than the lockout it repairs.
+    //
+    // SO THE REFUSAL IS HERE, AT THE INSTRUCTION THAT DESTROYS THE EVIDENCE,
+    // rather than a repair attempted afterwards from state that no longer exists.
+    // The cost is stated rather than hidden: A COPY-ON-WRITE OBJECT CANNOT BE
+    // EVICTED until the sharing is resolved -- one sharer writes and takes its
+    // private copy, or software tears the sharing down deliberately. In a system
+    // under memory pressure those are common pages, and this is a real limitation,
+    // not a free win.
+    //
+    // IT CANNOT BE WEAPONISED. Both this instruction and veda.odt.set.cow require
+    // `cur_privilege == Machine | veda_oda_authorized()`, so unprivileged code
+    // cannot mark objects copy-on-write to pin memory.
+    //
+    // WHAT WOULD BE BETTER, AND WHY IT IS NOT BUILT HERE. The entitlement should
+    // survive paging, which means it must live in the ENTRY rather than in the
+    // capabilities. The ODT has exactly one per-principal field, `owner_domain`,
+    // and it holds ONE domain -- while fork's whole point is that parent and child
+    // are DIFFERENT domains and both are entitled. A per-(domain, object)
+    // entitlement needs a table this design does not have. That is the successor,
+    // and it is named rather than half-built.
+    else if old_entry.cow then Illegal_Instruction()
     // The saturation refusal described above.
     else if old_entry.generation == 0xffffff then Illegal_Instruction()
     else {
