@@ -1142,7 +1142,13 @@ function veda_test_seed_odt() -> unit = {
     valid      = true,
     Base       = 0x00000080010000,
     Length     = 0x0000000040,
-    Perms      = 0x100C,
+    // R40: 0x103C, not 0x100C -- Permit_Load_Capability (bit 4) and
+    // Permit_Store_Capability (bit 5) added. This object is the corpus's general
+    // scratch area and four tests spill a CAPABILITY into it; once those two
+    // permissions became real, a container without them could no longer hold one.
+    // A fixture change, not an architecture change, and it is mirrored byte for
+    // byte in veda_core.tlv's own seed so the two layers cannot drift.
+    Perms      = 0x103C,
     generation = zeros(),
     owner_hart = VEDA_OWNER_UNOWNED,
     retired    = false,

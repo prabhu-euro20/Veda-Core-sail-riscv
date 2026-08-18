@@ -20,6 +20,19 @@ let VEDA_CAUSE_SEAL_VIOLATION      : bits(5) = 0b00011 // 0x03
 let VEDA_CAUSE_BOUNDS_VIOLATION    : bits(5) = 0b00001 // 0x01
 let VEDA_CAUSE_PERM_LOAD_VIOLATION  : bits(5) = 0b10010 // 0x12
 let VEDA_CAUSE_PERM_STORE_VIOLATION : bits(5) = 0b10011 // 0x13
+// R40 -- the two causes VEDA_CORE_SPEC.md has listed as **Active** since the
+// CHERI permission adoption and that appeared ZERO times in this model and zero
+// times in the RTL. Values are the specification's own, and both were verified
+// free against every VEDA_CAUSE_* constant in this file before use.
+//
+// They govern whether AUTHORITY ITSELF may move through memory, which on an
+// address-less machine is the whole of what a capability is. OCL.C/OCS.C were
+// authorised by the plain data permissions alone, so a delegation made "data
+// only" by clearing bit 4 could still lift a live, tagged capability out of the
+// bytes it was allowed to read. Demonstrated before it was fixed, in
+// sail_tests/vc_r40_cap_perm_enforce_neg.S.
+let VEDA_CAUSE_PERM_LOAD_CAPABILITY_VIOLATION  : bits(5) = 0b10100 // 0x14
+let VEDA_CAUSE_PERM_STORE_CAPABILITY_VIOLATION : bits(5) = 0b10101 // 0x15
 // Milestone V-B addition: NMC_ADD's own dedicated permission bit
 // (VEDA_CORE_SPEC.md Section 2's Perms table, Permit_NMC_Compute), not
 // Permit_Load/Permit_Store -- NMC_ADD is a compute-at-memory dispatch, a

@@ -60,7 +60,14 @@ mapping clause encdec = VEDA_OCS(rs2, rs1, rd)
 // (or the entry no longer being `valid` at all, i.e. the object was
 // destroyed and not yet replaced) is treated as a Tag Violation, matching
 // the spec's own words exactly ("mismatch -> Tag Violation", Section 5.1).
-function veda_check_access(capidx : vcapno, offset : xlenbits, width : int, need_load : bool, need_store : bool, check_align : bool) -> result(physaddr, ExecutionResult) = {
+// R40: need_cap is EXPLICIT and is not derived from check_align, even though the
+// two coincide today -- OCL.C and OCS.C are the only capability-width accesses and
+// the only ones that align-check. An implicit coupling between "this access is
+// 32-byte aligned" and "this access moves authority" is exactly the kind of
+// unstated dependency this file has been bitten by before; a future unaligned
+// capability access, or an aligned data access, would silently take the wrong
+// permission with it.
+function veda_check_access(capidx : vcapno, offset : xlenbits, width : int, need_load : bool, need_store : bool, need_cap : bool, check_align : bool) -> result(physaddr, ExecutionResult) = {
   let cap = C(capidx);
   let entry = odt_lookup(cap.Object_ID);
   // R19 increment 1: hoisted out of the Ok branch, because the alignment arm
@@ -76,6 +83,21 @@ function veda_check_access(capidx : vcapno, offset : xlenbits, width : int, need
   else if not(entry.valid) | entry.generation != cap.generation then Err(veda_trap(vcapno_to_vcapidx(capidx), VEDA_CAUSE_TAG_VIOLATION))
   else if isSealedCap(cap) then Err(veda_trap(vcapno_to_vcapidx(capidx), VEDA_CAUSE_SEAL_VIOLATION))
   else if need_load & not(permBit(cap.Perms, PERM_LOAD)) then Err(veda_trap(vcapno_to_vcapidx(capidx), VEDA_CAUSE_PERM_LOAD_VIOLATION))
+  // R40 -- BELOW the plain LOAD arm, deliberately. Reading the bytes at all is the
+  // prerequisite; reading them AS AUTHORITY is the additional right, so a holder
+  // with neither hears the coarser refusal first.
+  //
+  // A TRAP, NOT A CLEARED TAG, and that is a decision rather than a transcription.
+  // A hybrid ISA where one instruction loads both data and capabilities has to
+  // clear the tag instead of faulting, or an ordinary memcpy over mixed memory
+  // would fault constantly. THIS MACHINE HAS NO SUCH CASE: OCL.D/OCS.D and
+  // OCL.C/OCS.C are separate instructions, and the data path already invalidates
+  // tags byte-granularly, so a data copier cannot move a capability at all and
+  // never needs this permission. VEDA_CORE_SPEC.md's own cause table has called
+  // 0x14 a *Violation* since the permission set was adopted. Silence would also
+  // be the exact failure mode R30 and R32 closed elsewhere: a refusal software
+  // cannot observe is one it will not honour.
+  else if need_load & need_cap & not(permBit(cap.Perms, PERM_LOAD_CAPABILITY)) then Err(veda_trap(vcapno_to_vcapidx(capidx), VEDA_CAUSE_PERM_LOAD_CAPABILITY_VIOLATION))
   // ═══ R38 -- THE COPY-ON-WRITE FAULT'S ELIGIBILITY PREDICATE ═══
   //
   // This arm used to carry `& not(entry.cow)`. R19 increment 1 added that gate so
@@ -144,6 +166,11 @@ function veda_check_access(capidx : vcapno, offset : xlenbits, width : int, need
   // Copy-on-write exists to DEFER a copy that is already owed, not to
   // manufacture an entitlement the holder never had.
   else if need_store & not(permBit(cap.Perms, PERM_STORE)) then Err(veda_trap(vcapno_to_vcapidx(capidx), VEDA_CAUSE_PERM_STORE_VIOLATION))
+  // R40 -- the store-side twin, same ordering rule and same reasoning as the load
+  // side above. Writing bytes is the prerequisite; writing AUTHORITY into them is
+  // the additional right. Placed above alignment, bounds, residency and
+  // copy-on-write because it is a refusal, not a repair request.
+  else if need_store & need_cap & not(permBit(cap.Perms, PERM_STORE_CAPABILITY)) then Err(veda_trap(vcapno_to_vcapidx(capidx), VEDA_CAUSE_PERM_STORE_CAPABILITY_VIOLATION))
   // R19 increment 1 -- 32-byte alignment moved HERE from the OCL.C / OCS.C
   // callers, where it ran AFTER this whole chain returned Ok. Left there, a
   // misaligned store to a cow object would report 0x0C in Sail and 0x08 in the
@@ -237,7 +264,7 @@ function veda_check_access(capidx : vcapno, offset : xlenbits, width : int, need
 function clause execute VEDA_OCL(rs2, rs1, rd) = {
   let capidx = vcapidx_to_vcapno(rs1);
   let offset : xlenbits = X(rs2);
-  match veda_check_access(capidx, offset, xlen_bytes, true, false, false) {
+  match veda_check_access(capidx, offset, xlen_bytes, true, false, false, false) {
     Err(res) => res,
     Ok(paddr) => {
       let (data, _) : (xlenbits, mem_meta) = read_ram(Read_plain, paddr, xlen_bytes, false);
@@ -250,7 +277,7 @@ function clause execute VEDA_OCL(rs2, rs1, rd) = {
 function clause execute VEDA_OCS(rs2, rs1, rd) = {
   let capidx = vcapidx_to_vcapno(rs1);
   let offset : xlenbits = X(rs2);
-  match veda_check_access(capidx, offset, xlen_bytes, false, true, false) {
+  match veda_check_access(capidx, offset, xlen_bytes, false, true, false, false) {
     Err(res) => res,
     Ok(paddr) => {
       let data = X(rd);
@@ -293,7 +320,7 @@ mapping clause encdec = VEDA_OCS_C(rs2, rs1, rd)
 function clause execute VEDA_OCL_C(rs2, rs1, rd) = {
   let capidx = vcapidx_to_vcapno(rs1);
   let offset : xlenbits = X(rs2);
-  match veda_check_access(capidx, offset, 32, true, false, true) {
+  match veda_check_access(capidx, offset, 32, true, false, true, true) {
     Err(res) => res,
     Ok(paddr) => {
       // 32-byte natural alignment is architectural as of the 256-bit
@@ -328,7 +355,7 @@ function clause execute VEDA_OCL_C(rs2, rs1, rd) = {
 function clause execute VEDA_OCS_C(rs2, rs1, rd) = {
   let capidx = vcapidx_to_vcapno(rs1);
   let offset : xlenbits = X(rs2);
-  match veda_check_access(capidx, offset, 32, false, true, true) {
+  match veda_check_access(capidx, offset, 32, false, true, true, true) {
     Err(res) => res,
     Ok(paddr) => {
       // 32-byte natural alignment is architectural as of the 256-bit
@@ -382,6 +409,11 @@ mapping clause assembly = VEDA_OCS_C(rs2, rs1, rd)
 // distinct from OCL/OCS's Permit_Load/Permit_Store, since this is a
 // compute-at-memory dispatch, not a data movement operation (Section 3's
 // own dedicated cause code, 0x1f, for exactly this permission).
+// R40: no need_cap parameter, and its absence is deliberate rather than an
+// omission. NMC_ADD is a data read-modify-write -- it never moves a capability,
+// so PERM_LOAD_CAPABILITY and PERM_STORE_CAPABILITY have nothing to govern here.
+// Stated because the two checkers are kept textually parallel on purpose, and a
+// reader diffing them would otherwise have to guess whether this was forgotten.
 function veda_check_nmc_access(capidx : vcapno, width : int) -> result(physaddr, ExecutionResult) = {
   let cap = C(capidx);
   let entry = odt_lookup(cap.Object_ID);
