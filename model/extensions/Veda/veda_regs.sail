@@ -987,10 +987,6 @@ function veda_bind_domain_ok(owner_domain : bits(20)) -> bool =
   else if veda_pcc_object == VEDA_OBJECT_NONE then true
   else owner_domain == veda_pcc_object[43 .. 24]
 
-function veda_object_is_executing(object_id : bits(44)) -> bool =
-  (object_id == veda_pcc_object)
-  | (veda_trap_depth != zeros() & object_id == veda_mepcc_object)
-
 function veda_trap_level_has_context() -> bool =
   veda_pcc_length != VEDA_PCC_UNBOUNDED | veda_current_region != zeros() | veda_pcc_object != VEDA_OBJECT_NONE
 
@@ -1087,6 +1083,95 @@ function odt_lookup(object_id : bits(44)) -> odt_entry =
     Some(idx) => { assert(idx >= 0 & idx < VEDA_ODT_MODELED_ENTRIES); veda_odt[idx] },
     None()    => empty_odt_entry,
   }
+
+// ═══ R45 -- THE PIN COMPARED NAMES WHILE THE PROPERTY IT PROTECTS IS MEMORY ═══
+//
+// R11(b) added this so an authority cannot pull the ground out from under running
+// code. It read, in full:
+//     (object_id == veda_pcc_object)
+//     | (veda_trap_depth != zeros() & object_id == veda_mepcc_object)
+// an identity test on the NAME. But nothing in this design makes two Object_IDs
+// disjoint -- Populate takes Base verbatim and no overlap test exists anywhere --
+// so a second name at the running code's own Base walks straight past it.
+//
+// MEASURED, not derived: sail_tests/vc_r45_odt_alias_neg.S. From inside a live
+// compartment executing object 810, populating name 811 at 810's OWN Base
+// succeeded, and paging 811 out succeeded -- the pin compared 811 against 810 and
+// passed. Its control in the same test shows the pin still refusing 810 itself, so
+// the mechanism was not broken; it was looking at the wrong thing.
+//
+// THE FIX IS O(1) AND NEEDS NO DISJOINTNESS TABLE. Enforcing disjointness at
+// Populate would mean testing a new window against every live entry -- 2^23 of
+// them in this model -- which is not a hardware operation. But the pin does not
+// need to know about every object: it needs to know about ONE window, the one the
+// CPU is executing from, and that is two live registers. A single range overlap
+// against them is exactly the property R11(b) wanted and strictly subsumes the
+// name test, which is kept because it is free and because it states the intent.
+//
+// GATED ON THE LIVE-COMPARTMENT NAME, per R26. The window arm must not fire when
+// no compartment is live, because veda_pcc_length is then VEDA_PCC_UNBOUNDED and
+// would overlap everything -- refusing every eviction on the machine. R26 already
+// settled which predicate is trustworthy for "is a compartment live": the NAME,
+// veda_pcc_object != VEDA_OBJECT_NONE, because the Length sentinel is forgeable.
+//
+// BOTH FRAMES, deliberately. The live PCC and the saved MEPCC each get the window
+// arm alongside their existing name arm. Doing the live one alone would leave the
+// same bypass available from inside a trap handler -- the "applied to four of five
+// arms" shape this project has now been bitten by five times.
+//
+// COST, stated: one extra ODT read on four privileged, rare instructions
+// (Populate, Populate-Fast, Destroy, page-out). The predicate moved below
+// odt_lookup to make that read legal, and its four call sites are untouched --
+// R11(b)'s own comment prizes that the consumer set stays exactly answerable.
+function veda_windows_overlap(a_base : bits(56), a_len : bits(40),
+                              b_base : bits(56), b_len : bits(40)) -> bool = {
+  let a_lo : int = unsigned(a_base);
+  let a_hi : int = a_lo + unsigned(a_len);
+  let b_lo : int = unsigned(b_base);
+  let b_hi : int = b_lo + unsigned(b_len);
+  (a_lo < b_hi) & (b_lo < a_hi)
+}
+
+function veda_object_is_executing(object_id : bits(44)) -> bool = {
+  let e = odt_lookup(object_id);
+  let name_hit : bool =
+    (object_id == veda_pcc_object)
+    | (veda_trap_depth != zeros() & object_id == veda_mepcc_object);
+  // THE UNBOUNDED GATE, AND THE FIRST DRAFT WAS REFUTED WITHOUT IT -- by the
+  // corpus, in the control that exists for exactly this. vc_r11b_executing_pin_neg
+  // PART D is the over-refusal control: "an unrelated object is still evictable
+  // while a compartment runs. Without it, a core that refused every eviction
+  // outright would pass everything above." Its CODE object is populated with
+  // Length UNBOUNDED, so veda_pcc_length covers all memory, every window overlaps
+  // it, and the first version of this arm refused every eviction on the machine.
+  // The control caught it on the first run.
+  //
+  // An UNBOUNDED PCC does not describe a bounded region of memory, so the window
+  // test degenerates rather than being merely conservative. In that state the name
+  // arm is the only meaningful one -- and R26 already settled that the NAME is the
+  // trustworthy compartment predicate, precisely because the Length sentinel is
+  // the forgeable half.
+  //
+  // THE RESIDUAL IS REAL AND IS STATED RATHER THAN HIDDEN: a compartment entered
+  // on an UNBOUNDED code object still gets only the name pin, so the alias
+  // eviction is still reachable there. The mitigation is that such an object is
+  // not a compartment in any meaningful sense -- it declares no bounds on its own
+  // execution -- and OCInvoke takes veda_pcc_length from a real code capability.
+  // Writing 0x7C0-0x7C3 to forge it while a compartment is live is already refused
+  // (R27/R28), so this is not an attacker-reachable downgrade of the arm.
+  let live_hit : bool =
+    e.valid
+    & (veda_pcc_object != VEDA_OBJECT_NONE)
+    & (veda_pcc_length != VEDA_PCC_UNBOUNDED)
+    & veda_windows_overlap(e.Base, e.Length, veda_pcc_base, veda_pcc_length);
+  let saved_hit : bool =
+    e.valid
+    & (veda_trap_depth != zeros())
+    & (veda_mepcc_object != VEDA_OBJECT_NONE)
+    & (veda_mepcc_length != VEDA_PCC_UNBOUNDED)
+    & veda_windows_overlap(e.Base, e.Length, veda_mepcc_base, veda_mepcc_length);
+  name_hit | live_hit | saved_hit
+}
 
 function odt_write(object_id : bits(44), e : odt_entry) -> unit =
   match veda_odt_index(object_id) {
