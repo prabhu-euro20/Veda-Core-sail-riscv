@@ -632,6 +632,71 @@ mapping clause encdec = VEDA_ODT_DESTROY(rs1, rd)
 function veda_oda_authorized() -> bool =
   veda_oda_tag & not(isSealedCap(veda_oda)) & permBit(veda_oda.Perms, PERM_ACCESS_SYSTEM_REGISTERS)
 
+// ═══ R47 -- THE ODA CARRIES A WINDOW, AND NOTHING READ IT ══════════════════
+//
+// `veda_oda_authorized()` directly above is three terms wide: tag, otype, one
+// permission bit. Base, Length, Offset and Object_ID -- 196 of the ODA's 256
+// bits -- were consulted by NONE of the seven instructions it authorizes. So
+// the delegated authority to write the Object Descriptor Table was a BEARER
+// TOKEN over all of memory: any holder of any ODA could mint a descriptor
+// naming any Base, any Length and any Perms, Bind it, and dereference it.
+//
+// That is the whole memory-safety claim, handed away by a register this design
+// made a capability SPECIFICALLY so that it could carry a window --
+// veda_regs.sail says so in as many words: the ODA "must carry
+// Base/Length/Perms/Tag, none of which a 64-bit CSR can hold." The design
+// stated the window; the implementation never read it.
+//
+// MEASURED, AND THE MEASUREMENT WAS ALREADY IN THE SUITE, PASSING.
+// rtl/sim/veda_smoke_m11.S mints authority object 40 at Base 0x80011000
+// Length 0x40, installs it as the ODA, drops to User, and from User mints
+// object 41 at Base 0x80012000 -- four kilobytes outside its own authority's
+// window. Its own comment calls that "the real proof" the ODA path works, and
+// it is. It is also the escape, pinned as the contract. Reproduced
+// independently in sail_tests/vc_r47_oda_scope_neg.S, which measured trap
+// count 0 where the architecture owes 1.
+//
+// THE RULE. On the DELEGATED path only, the memory a descriptor names must lie
+// inside the ODA's window -- both what the entry names NOW and what it will
+// name AFTER. Machine privilege is deliberately untouched: it takes the other
+// half of the `Machine | oda_authorized()` OR, needs no ODA, and already owns
+// the machine, so scoping it would be theatre. Delegation is the thing that
+// must be narrower than the delegator.
+//
+// WIDTH. Computed over Sail's unbounded `int`, mirroring the RTL's 57-bit
+// comparators, because Base is 56 bits and Length is 40 and `Base + Length`
+// fits neither. R18 was exactly this bug on the dereference bounds check: a
+// containment test that wraps reports the whole machine as contained.
+// vc_r47_oda_scope_neg.S ATTACK 3 drives it with a saturating veda_attr Length.
+//
+// CAUSE. Illegal_Instruction, matching every sibling refusal on these seven
+// instructions -- and deliberately, not merely conventionally: a distinct
+// cause code would let unprivileged code binary-search its own ODA's window by
+// trap cause. That is the oracle shape DESIGN_07 D-7 found on `owner_domain`.
+//
+// WHAT THIS DOES NOT CLOSE, stated rather than left to be discovered. The ODA
+// is ONE global register, and only Machine can install one (VEDA_OSPECIALRW is
+// Machine-only for read AND write). A delegated allocator therefore gets one
+// window and cannot narrow its own authority further -- there is no monotone
+// self-attenuation for the ODA the way CSetBounds/CAndPerm give one for
+// ordinary capabilities. And veda_regs.sail records that the ODA is
+// deliberately NOT cleared by OCInvoke/OCReturn, so an ODA live across a
+// compartment crossing is inherited by the callee. Both are recorded as
+// DESIGN_07 R47 open halves; this increment makes the window load-bearing,
+// which is the prerequisite for either.
+function veda_oda_covers(base : bits(56), length : bits(40)) -> bool = {
+  let o_lo : int = unsigned(veda_oda.Base);
+  let o_hi : int = o_lo + unsigned(veda_oda.Length);
+  let t_lo : int = unsigned(base);
+  let t_hi : int = t_lo + unsigned(length);
+  (o_lo <= t_lo) & (t_hi <= o_hi)
+}
+
+// True when this actor reached the instruction through the ODA rather than
+// through Machine privilege, AND the ODA does not cover the named memory.
+function veda_oda_denies(base : bits(56), length : bits(40)) -> bool =
+  (cur_privilege != Machine) & not(veda_oda_covers(base, length))
+
 function clause execute VEDA_ODT_POPULATE(rs2, rs1, rd) = {
   if not(cur_privilege == Machine | veda_oda_authorized()) then Illegal_Instruction()
   else {
@@ -660,6 +725,18 @@ function clause execute VEDA_ODT_POPULATE(rs2, rs1, rd) = {
     else {
     let descriptor : bits(64) = zero_extend(X(rs2));
     let old_entry = odt_lookup(object_id);
+    // R47: BOTH windows. The new one because this instruction CREATES the
+    // authority; the old one because repopulating a LIVE slot bumps its
+    // generation and repoints it -- so without it a delegated actor could
+    // hijack any descriptor in the machine simply by aiming the new Base into
+    // its own window. `old_entry.valid` gates the old half and MUST: a free
+    // slot has no live descriptor to protect, and an ungated check would make
+    // every never-populated slot (Base 0, Length 0) unmintable by any ODA that
+    // does not cover address zero -- which is to say, it would delete the
+    // mechanism rather than scope it.
+    if veda_oda_denies(zero_extend(descriptor[63 .. 32]), zero_extend(descriptor[31 .. 16]))
+       | (old_entry.valid & veda_oda_denies(old_entry.Base, old_entry.Length)) then Illegal_Instruction()
+    else
     // RTL Milestone 16 mirror (veda_types.sail's own `retired` field
     // comment has the full real reasoning): a slot that has already
     // exhausted its real generation counter can never be safely
@@ -776,6 +853,16 @@ function clause execute VEDA_ODT_DESTROY(rs1, rd) = {
     if veda_object_is_executing(object_id) then Illegal_Instruction()
     else {
     let old_entry = odt_lookup(object_id);
+    // R47: deliberately NOT gated on `old_entry.valid`, unlike Populate above.
+    // Destroy bumps the generation of an invalid slot too, and can retire it,
+    // so an ungated delegated actor could burn the temporal-safety counter of
+    // every slot it does not own. A never-populated slot reads Base 0 Length 0
+    // and is therefore refused unless the ODA covers address zero -- correct:
+    // destroying an object that does not exist buys nothing and costs a
+    // namespace. A slot this actor destroyed itself keeps its Base (Destroy
+    // preserves it) and stays within reach.
+    if veda_oda_denies(old_entry.Base, old_entry.Length) then Illegal_Instruction()
+    else {
     // RTL Milestone 16: Destroy always bumps (unlike Populate, it is not
     // itself gated by `retired` -- destroying an already-retired slot is
     // harmless, it just stays invalid and retired), but the same
@@ -804,6 +891,7 @@ function clause execute VEDA_ODT_DESTROY(rs1, rd) = {
     });
     X(rd) = zeros();
     RETIRE_SUCCESS
+    }
     }
   }
 }
@@ -879,6 +967,14 @@ function clause execute VEDA_ODT_POPULATE_FAST(rs2, rs1, rd) = {
     let base_gpr64 : bits(64) = zero_extend(X(rs2));
     let base : bits(56) = base_gpr64[55..0];
     let old_entry = odt_lookup(object_id);
+    // R47, same rule as plain Populate. Length here comes from veda_attr,
+    // which is Machine-only to WRITE but is read internally by this
+    // instruction rather than through a CSR access -- so a User actor consumes
+    // whatever Machine last left there, which is exactly what makes the
+    // wrapping-Length case reachable from User at all.
+    if veda_oda_denies(base, veda_attr[55 .. 16])
+       | (old_entry.valid & veda_oda_denies(old_entry.Base, old_entry.Length)) then Illegal_Instruction()
+    else
     if old_entry.retired then Illegal_Instruction()
     else {
       let new_generation : bits(24) =
@@ -993,6 +1089,10 @@ function clause execute VEDA_ODT_SET_COW(rs2, rs1, rd) = {
     let flag_gpr64 : bits(64) = zero_extend(X(rs2));
     let new_cow : bool = flag_gpr64[0] == bitone;
     let old_entry = odt_lookup(object_id);
+    // R47: a policy write is authority over the descriptor, and so it needs
+    // authority over the memory that descriptor names.
+    if veda_oda_denies(old_entry.Base, old_entry.Length) then Illegal_Instruction()
+    else
     if not(old_entry.valid) then Illegal_Instruction()
     else {
       odt_write(object_id, struct {
@@ -1033,6 +1133,10 @@ function clause execute VEDA_ODT_SET_DOMAIN(rs2, rs1, rd) = {
     let domain_gpr64 : bits(64) = zero_extend(X(rs2));
     let new_domain : bits(20) = domain_gpr64[19..0];
     let old_entry = odt_lookup(object_id);
+    // R47: a policy write is authority over the descriptor, and so it needs
+    // authority over the memory that descriptor names.
+    if veda_oda_denies(old_entry.Base, old_entry.Length) then Illegal_Instruction()
+    else
     // Refuse on a slot that holds nothing: a policy on a non-existent object is
     // meaningless, and allowing it would let software pre-stage rules on slots
     // it does not own yet, to take effect when someone else populates them.
@@ -1104,6 +1208,11 @@ function clause execute VEDA_ODT_PAGE_OUT(rs1, rd) = {
     let object_id_gpr64 : bits(64) = zero_extend(X(rs1));
     let object_id : bits(44) = object_id_gpr64[43..0];
     let old_entry = odt_lookup(object_id);
+    // R47: eviction is authority over the object. It reads above the executing
+    // pin here only in source order -- both refuse with Illegal_Instruction, so
+    // neither can be used to probe past the other.
+    if veda_oda_denies(old_entry.Base, old_entry.Length) then Illegal_Instruction()
+    else
     // Only a live, resident object can be paged out. A non-existent one has
     // nothing to evict; an already-paged-out one would bump generation a
     // second time for no benefit, burning the budget and invalidating the
@@ -1229,6 +1338,14 @@ function clause execute VEDA_ODT_PAGE_IN(rs2, rs1, rd) = {
     let base_gpr64 : bits(64) = zero_extend(X(rs2));
     let base : bits(56) = base_gpr64[55..0];
     let old_entry = odt_lookup(object_id);
+    // R47: BOTH windows again, and for a reason page-out does not have. This
+    // instruction CHOOSES WHERE THE OBJECT LANDS, so without the new half a
+    // delegated actor could page a foreign object into its own window and own
+    // it outright. The old Base survives page-out (preserved, stale but
+    // present), so the old half is a real test rather than a read of zeros.
+    if veda_oda_denies(old_entry.Base, old_entry.Length)
+       | veda_oda_denies(base, old_entry.Length) then Illegal_Instruction()
+    else
     if not(old_entry.valid) | old_entry.resident then Illegal_Instruction()
     else {
       odt_write(object_id, struct {
