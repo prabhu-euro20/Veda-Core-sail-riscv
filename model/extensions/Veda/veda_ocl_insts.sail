@@ -1118,7 +1118,9 @@ function clause execute VEDA_ODT_SET_COW(rs2, rs1, rd) = {
     // authority over the memory that descriptor names.
     // R63: the region named must be a region that EXISTS -- and it must be a
     // REFUSAL, not the silent no-op a gated odt_write would be.
-    if not(veda_region_nameable(object_id)) | veda_oda_denies(old_entry.Base, old_entry.Length) then Illegal_Instruction()
+    // R65: and a delegated actor may not authorize against a Base the object
+    // has LEFT. See veda_stale_authority.
+    if veda_stale_authority(old_entry) | not(veda_region_nameable(object_id)) | veda_oda_denies(old_entry.Base, old_entry.Length) then Illegal_Instruction()
     else
     if not(old_entry.valid) then Illegal_Instruction()
     else {
@@ -1164,7 +1166,9 @@ function clause execute VEDA_ODT_SET_DOMAIN(rs2, rs1, rd) = {
     // authority over the memory that descriptor names.
     // R63: the region named must be a region that EXISTS -- and it must be a
     // REFUSAL, not the silent no-op a gated odt_write would be.
-    if not(veda_region_nameable(object_id)) | veda_oda_denies(old_entry.Base, old_entry.Length) then Illegal_Instruction()
+    // R65: and a delegated actor may not authorize against a Base the object
+    // has LEFT. See veda_stale_authority.
+    if veda_stale_authority(old_entry) | not(veda_region_nameable(object_id)) | veda_oda_denies(old_entry.Base, old_entry.Length) then Illegal_Instruction()
     else
     // Refuse on a slot that holds nothing: a policy on a non-existent object is
     // meaningless, and allowing it would let software pre-stage rules on slots

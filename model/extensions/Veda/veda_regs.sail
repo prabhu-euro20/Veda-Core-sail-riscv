@@ -1230,6 +1230,42 @@ function veda_region_is_resident(region : bits(20)) -> bool = {
 // either falls outside its modeled window. Bounding BOTH region and local is
 // what guarantees global uniqueness -- a local that overflowed its window
 // would otherwise alias the next region's slots.
+// ═══ R65 -- AN AUTHORITY TEST AGAINST A BASE THE OBJECT HAS LEFT ═══
+//
+// veda.odt.set.cow and veda.odt.set.domain authorize a DELEGATED actor with
+// veda_oda_denies(old_entry.Base, old_entry.Length), and neither requires the
+// entry to be resident. Page-out preserves Base as an explicitly dead value --
+// veda_ocl_insts.sail's own comment on that line reads "stale, and unreachable"
+// -- because freeing the frame is the entire point of eviction. So for a
+// paged-out object the gate asks about the frame the object HAS LEFT, and grants
+// authority over the object it IS.
+//
+// MEASURED END TO END on the shipped model, from User with an ODA covering only
+// victim_frame:
+//   set.domain on the PAGED-OUT victim        ->  ACCEPTED, 0 traps
+//   set.domain on an out-of-window object     ->  REFUSED           (control)
+//   page.in the victim at new_frame (M)       ->  succeeds
+//   bind the victim, CGetBase                 ->  0x80000240 = new_frame
+// The attacker's window covered 0x800001c0 and never covered 0x80000240. Bind
+// consults no ODA at all, so the capability is mintable. Destroy-and-Populate
+// cannot substitute: Destroy clears `valid` and page-in then refuses, so the
+// victim's restored CONTENTS are reachable only through this path.
+//
+// NOT R47's residual. R47 gave the ODA a window in SPACE. This is the same
+// window in TIME: correct when written, meaningless the instant the object is
+// evicted, and nothing marks the transition.
+//
+// THE RULE: while an object is NOT RESIDENT its Base describes nothing, so it
+// may not be used to authorize anything. Machine is EXEMPT, deliberately, and
+// this is the opposite of the R62 decision -- for a stated reason. R62 gated a
+// WELL-FORMEDNESS question (does this principal exist?), which applies to every
+// caller including Machine. This gates the VALIDITY OF AN AUTHORITY TEST, and
+// Machine takes the `cur_privilege == Machine` half of the OR and is never
+// window-tested at all -- so gating it would remove a real capability from the
+// loader for no security gain.
+function veda_stale_authority(e : odt_entry) -> bool =
+  (cur_privilege != Machine) & e.valid & not(e.resident)
+
 // R63, the WRITE-side half. veda_odt_index below makes RESOLUTION fail closed,
 // which is the right backstop but is NOT a refusal: odt_write's None() arm is
 // `()`, so a gated write becomes a SILENT NO-OP -- the instruction retires
