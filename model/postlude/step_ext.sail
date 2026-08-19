@@ -63,6 +63,7 @@ function ext_reset() -> unit = {
   // "object 0 faulted" the same reading -- the identical argument R10 used to
   // give the CRBR shadow an out-of-window sentinel, and the reason the first
   // version of this register read 0 and its own test caught it.
+  veda_invoke_since_trap = zeros();
   veda_mfaultobj = VEDA_OBJECT_NONE;
   veda_fault_obj_staged = false;
   veda_saved_region_base = zeros();

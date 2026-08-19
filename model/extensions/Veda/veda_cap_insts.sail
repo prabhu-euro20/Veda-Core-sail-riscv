@@ -706,6 +706,12 @@ function clause execute VEDA_OCINVOKE(rs2, rs1) = {
     // and the R11 code-object check has to be settled first, because both
     // must fault before any commit.
     veda_oda_tag = false;
+    // R67: a descent made while a trap frame is outstanding is NOT the handler
+    // leaving -- it is the handler calling out, and the frame is still owed.
+    // Saturating rather than wrapping, so a runaway cannot alias zero and turn
+    // the next OCRETURN back into an abandon.
+    if veda_trap_depth != zeros() & veda_invoke_since_trap != 0xFF
+    then veda_invoke_since_trap = veda_invoke_since_trap + 1;
     let target : xlenbits = veda_to_xlen(zero_extend(cs1.Base) + zero_extend(cs1.Offset));
     jump_to([target with 0 = bitzero])
     }
@@ -928,7 +934,15 @@ function clause execute VEDA_OCRETURN(rs1) = {
     // installed from cs1, so any saved frame is superseded -- abandon it
     // rather than leave it outstanding, which would strand the depth and
     // eventually poison every later return.
-    veda_trap_frame_abandon();
+    // R67: abandon the frame ONLY if this OCRETURN is the handler leaving, not
+    // merely the unwinding of an OCInvoke the handler made. The frame belongs to
+    // the principal that trapped; a callee the handler invoked must not be able
+    // to consume it. Measured before this line existed: compartment D, which
+    // never trapped, popped compartment C's frame and C could never be
+    // reinstated with its own bounds.
+    if veda_invoke_since_trap != zeros()
+    then veda_invoke_since_trap = veda_invoke_since_trap - 1
+    else veda_trap_frame_abandon();
     let target : xlenbits = veda_to_xlen(zero_extend(cs1.Base) + zero_extend(cs1.Offset));
     jump_to([target with 0 = bitzero])
     }

@@ -253,6 +253,35 @@ val veda_crbr_release : unit -> unit
 // handler reads VEDA_OBJECT_NONE -- "I do not know", which is the safe answer.
 // There is no edit anywhere that can make this register report the WRONG
 // object; the worst an omission can do is report none.
+// ═══ R67 -- THE TRAP FRAME HAS NO OWNER, ONLY A COUNT ═══
+//
+// veda_trap_frame_abandon asks "is a frame outstanding" -- a COUNT -- and never
+// "is this frame mine to abandon" -- an IDENTITY. veda_trap_depth is pushed at
+// exactly ONE site (trap entry) and popped at TWO (restore_on_xret and abandon),
+// and OCInvoke touches it nowhere. So an OCRETURN executed by a principal that
+// never trapped pops a frame it did not push.
+//
+// MEASURED on the shipped model, by instruction trace:
+//   compartment C traps          -> depth 1, mepcc_length = 0x40 (C's window)
+//   the handler OCInvokes into D -> depth still 1; D never trapped
+//   D executes OCRETURN          -> depth 0, mepcc_length = 0xFFFFFFFFFF
+// C's frame is gone, so any later mret restores nothing and C is never
+// reinstated with its own bounds. R12's poison does not catch it: poison arms on
+// a nested TRAP, and no trap occurred inside the handler.
+//
+// THIS SHARPENS R12 RATHER THAN CONTRADICTING IT. R12's justification for
+// abandoning is that OCRETURN "installs PCC from its own operand, so any saved
+// context is superseded by definition." That is true of the handler's EXIT. It
+// is NOT true of an OCRETURN that merely returns from a callee the handler
+// invoked -- there the handler is still running and the saved context is still
+// owed. This counter is exactly that distinction, and nothing more.
+//
+// Why a counter and not an owner check: the shipped switcher deliberately
+// OCRETURNs to a DIFFERENT principal than the one that trapped -- that is what
+// a scheduler does -- so requiring the target to equal veda_mepcc_object would
+// break the one path R12 was written for.
+register veda_invoke_since_trap : bits(8)
+
 register veda_mfaultobj : bits(44)
 // The staging flag exists so the chokepoint can tell "nothing was staged this
 // trap" from "the object staged happens to be zero". Same reason the CRBR shadow
@@ -359,6 +388,8 @@ function veda_pcc_restore_on_xret() -> unit = {
   if veda_trap_depth != zeros() then {
     veda_trap_depth = veda_trap_depth - 1;
     if veda_trap_depth == zeros() then {
+      // R67: this level is over on the xret path as well.
+      veda_invoke_since_trap = zeros();
       if veda_trap_poison then {
         // FAIL CLOSED. The chain could not be reconstructed, so we do not
         // guess at a context. A zero-length PCC faults on the very next
@@ -1071,6 +1102,8 @@ function veda_trap_frame_abandon() -> unit = {
       // away from a compartment can then evict its code object.
       veda_mepcc_object = VEDA_OBJECT_NONE;
       veda_trap_poison = false;
+      // R67: the level is over, so its in-handler invoke count goes with it.
+      veda_invoke_since_trap = zeros();
     }
   }
 }
