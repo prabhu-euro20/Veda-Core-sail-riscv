@@ -756,6 +756,26 @@ function clause execute VEDA_ODT_POPULATE(rs2, rs1, rd) = {
     // does not cover address zero -- which is to say, it would delete the
     // mechanism rather than scope it.
     if veda_oda_denies(zero_extend(descriptor[63 .. 32]), zero_extend(descriptor[31 .. 16]))
+    // R68: R65's rule reaches here too. veda_oda_denies tests old_entry.Base,
+    // and page-out preserves that Base as a value the model's own comment calls
+    // "stale, and unreachable" -- so for a NON-RESIDENT object this window test
+    // asks about the frame the object has LEFT. R65 installed the term at
+    // set.cow and set.domain and stopped there; the same test authorizes at
+    // seven sites.
+    //
+    // MEASURED: from User, with an ODA covering only the freed frame, a Populate
+    // over the paged-out victim was ACCEPTED, while the identical instruction
+    // against an out-of-window object was REFUSED -- so the gate is present and
+    // it is the staleness that defeats it.
+    //
+    // Populate-Fast is NOT exempt, and the sentence that would have exempted it
+    // is itself an expired justification: DESIGN_02's mechanism-1 sketch says the
+    // handler "allocates physical Base (ODT-Populate-Fast)", but that document's
+    // own later decision supersedes it -- "Page-in therefore CANNOT be plain
+    // ODT-Populate ... a distinct, generation-preserving page-in path is
+    // required". The repair path is veda.odt.page.in, which is deliberately left
+    // for its own pass.
+       | veda_stale_authority(old_entry)
        | (old_entry.valid & veda_oda_denies(old_entry.Base, old_entry.Length)) then Illegal_Instruction()
     else
     // RTL Milestone 16 mirror (veda_types.sail's own `retired` field
@@ -918,7 +938,26 @@ function clause execute VEDA_ODT_DESTROY(rs1, rd) = {
     // destroying an object that does not exist buys nothing and costs a
     // namespace. A slot this actor destroyed itself keeps its Base (Destroy
     // preserves it) and stays within reach.
-    if veda_oda_denies(old_entry.Base, old_entry.Length) then Illegal_Instruction()
+    // R68: R65's rule reaches here too. veda_oda_denies tests old_entry.Base,
+    // and page-out preserves that Base as a value the model's own comment calls
+    // "stale, and unreachable" -- so for a NON-RESIDENT object this window test
+    // asks about the frame the object has LEFT. R65 installed the term at
+    // set.cow and set.domain and stopped there; the same test authorizes at
+    // seven sites.
+    //
+    // MEASURED: from User, with an ODA covering only the freed frame, a Populate
+    // over the paged-out victim was ACCEPTED, while the identical instruction
+    // against an out-of-window object was REFUSED -- so the gate is present and
+    // it is the staleness that defeats it.
+    //
+    // Populate-Fast is NOT exempt, and the sentence that would have exempted it
+    // is itself an expired justification: DESIGN_02's mechanism-1 sketch says the
+    // handler "allocates physical Base (ODT-Populate-Fast)", but that document's
+    // own later decision supersedes it -- "Page-in therefore CANNOT be plain
+    // ODT-Populate ... a distinct, generation-preserving page-in path is
+    // required". The repair path is veda.odt.page.in, which is deliberately left
+    // for its own pass.
+    if veda_stale_authority(old_entry) | veda_oda_denies(old_entry.Base, old_entry.Length) then Illegal_Instruction()
     else {
     // RTL Milestone 16: Destroy always bumps (unlike Populate, it is not
     // itself gated by `retired` -- destroying an already-retired slot is
@@ -1032,6 +1071,26 @@ function clause execute VEDA_ODT_POPULATE_FAST(rs2, rs1, rd) = {
     // whatever Machine last left there, which is exactly what makes the
     // wrapping-Length case reachable from User at all.
     if veda_oda_denies(base, veda_attr[55 .. 16])
+    // R68: R65's rule reaches here too. veda_oda_denies tests old_entry.Base,
+    // and page-out preserves that Base as a value the model's own comment calls
+    // "stale, and unreachable" -- so for a NON-RESIDENT object this window test
+    // asks about the frame the object has LEFT. R65 installed the term at
+    // set.cow and set.domain and stopped there; the same test authorizes at
+    // seven sites.
+    //
+    // MEASURED: from User, with an ODA covering only the freed frame, a Populate
+    // over the paged-out victim was ACCEPTED, while the identical instruction
+    // against an out-of-window object was REFUSED -- so the gate is present and
+    // it is the staleness that defeats it.
+    //
+    // Populate-Fast is NOT exempt, and the sentence that would have exempted it
+    // is itself an expired justification: DESIGN_02's mechanism-1 sketch says the
+    // handler "allocates physical Base (ODT-Populate-Fast)", but that document's
+    // own later decision supersedes it -- "Page-in therefore CANNOT be plain
+    // ODT-Populate ... a distinct, generation-preserving page-in path is
+    // required". The repair path is veda.odt.page.in, which is deliberately left
+    // for its own pass.
+       | veda_stale_authority(old_entry)
        | (old_entry.valid & veda_oda_denies(old_entry.Base, old_entry.Length)) then Illegal_Instruction()
     else
     // R66: same rule, same reason -- see VEDA_ODT_POPULATE above.
