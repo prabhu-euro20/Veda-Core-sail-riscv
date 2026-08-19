@@ -325,7 +325,51 @@ function clause execute VEDA_BINDINST(mode_bits, rs1, rd) = {
   // go run the pager is worse than useless -- it is a hint about an object that
   // is none of its business. Same ordering argument DESIGN_02 used to put
   // residency last among the entry-derived tests.
-  if not(veda_bind_domain_ok(e.owner_domain)) then veda_trap_obj(rd, VEDA_CAUSE_DOMAIN_VIOLATION, object_id)
+  //
+  // ═══ R73 -- THE REFUSAL IS MODE-DEPENDENT, LIKE EVERY OTHER ONE HERE ═══
+  //
+  // This gate used to trap for ALL THREE modes, and nothing said why. It was
+  // written next to the residency gate and silently inherited residency's
+  // all-modes policy without inheriting residency's ARGUMENT, which does not
+  // transfer. Residency and region traps for every mode DELIBERATELY, and both
+  // say so at length: a Tag-clear would tell the holder "your object is gone"
+  // when the truth is "paged out, retry after servicing", and the pager would
+  // never be invoked. THERE IS NOTHING TO SERVICE ON A DOMAIN REFUSAL.
+  //
+  // Milestone 12 set the rule for ownership refusals and the arm below still
+  // implements it for `owner_hart`: plain Bind hard-traps, Bind-NoTrap
+  // soft-fails, "matching its own established convention for every other
+  // failure reason". This gate was the one exception, and it was silent.
+  //
+  // R43 IS WHY THIS MATTERS BEYOND TIDINESS. R43 chose a soft-fail for its new
+  // Rebind refusal and justified the choice by the comment directly above the
+  // Rebind arm -- "Rebind never traps for ANY failure reason, owner mismatch
+  // included". That sentence was FALSE AT SOURCE when R43 relied on it: this
+  // line traps Rebind on exactly an owner mismatch. A decision was justified by
+  // a property the code did not have.
+  //
+  // MEASURED before changing anything, on BOTH layers: a Bind-NoTrap from a
+  // region-1 compartment against a domain-0 object trapped with mtval 0xAB
+  // (cap_idx 5, cause 0x0B), and the RTL agreed exactly. NOT a divergence and
+  // NOT an escape -- trapping is fail-closed and a soft-fail grants nothing
+  // either. It is a contract defect, and the severity is stated rather than
+  // inflated.
+  //
+  // WHY HONOUR THE MODE rather than amend the documents: choosing mode 0b01 IS
+  // the software's declaration that it wants the quiet answer. An instruction
+  // whose whole purpose is to ASK WITHOUT FAULTING cannot have a failure reason
+  // that faults. Code that is not deliberately probing uses plain Bind, which
+  // still traps loudly, so a genuine bug is still caught early.
+  //
+  // Each mode keeps its OWN established soft-fail shape: Bind-NoTrap zeroes the
+  // register and clears Tag; Rebind clears Tag ONLY, preserving every field
+  // including Offset (VEDA_CORE_SPEC.md Section 4, and RTL-4's own note).
+  if not(veda_bind_domain_ok(e.owner_domain)) then match mode {
+    VEDA_BIND          => veda_trap_obj(rd, VEDA_CAUSE_DOMAIN_VIOLATION, object_id),
+    VEDA_BIND_NOTRAP   => { wC(rdno, zero_capability); wCTag(rdno, false); RETIRE_SUCCESS },
+    VEDA_REBIND        => { wCTag(rdno, false); RETIRE_SUCCESS },
+    VEDA_BIND_RESERVED => Illegal_Instruction()
+  }
   else if e.valid & not(e.resident) then veda_trap_obj(rd, VEDA_CAUSE_RESIDENCY_FAULT, object_id)
   else
 
