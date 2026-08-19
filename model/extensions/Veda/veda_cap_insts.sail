@@ -46,13 +46,15 @@ function clause execute VEDA_OCA(rs2, rs1, rd) = {
   // `rs2_val + loaded`, no detour through `int`) rather than a signed
   // `int` add followed by `to_bits`: a real compile error ("Could not
   // resolve quantifiers for to_bits... 0 <= new_offset_wide & ... < 2^16")
-  // showed Sail can't statically prove an unconstrained `int` fits in 16
-  // bits, the identical class of issue already documented and fixed once
-  // in Milestone V-A (bitvector indexing needs a statically-provable
-  // bound). Fixed by adding in fixed-width bits (two's-complement
-  // wraparound correctly represents a "negative" result as a large
-  // unsigned pattern) and slicing the low 16 bits directly -- both are
-  // statically valid on a known-width vector, no bounds proof needed.
+  // showed Sail can't statically prove an unconstrained `int` fits in the
+  // field's own width (16 bits originally; 20 bits since the 2026-08-19
+  // Length/Offset widening), the identical class of issue already
+  // documented and fixed once in Milestone V-A (bitvector indexing needs
+  // a statically-provable bound). Fixed by adding in fixed-width bits
+  // (two's-complement wraparound correctly represents a "negative" result
+  // as a large unsigned pattern) and slicing the low 20 bits directly --
+  // both are statically valid on a known-width vector, no bounds proof
+  // needed.
   // `xlenbits`, not hardcoded `bits(64)` -- OCA has no `xlen == 64` gate
   // (unlike OCL.D/OCS.D/NMC_ADD.D), so a real type error ("Failed to
   // prove constraint: xlen == 64") confirmed the width must stay generic.
@@ -64,7 +66,7 @@ function clause execute VEDA_OCA(rs2, rs1, rd) = {
     Object_ID = cap.Object_ID,
     Base      = cap.Base,
     Length    = cap.Length,
-    Offset    = sum[15..0],
+    Offset    = sum[19..0],
     Perms     = cap.Perms,
     otype     = cap.otype,
     Reserved  = cap.Reserved,
@@ -158,9 +160,11 @@ mapping clause assembly = VEDA_CAPQUERY(q, rs1, rd)
 // own real distinction, which exists because CHERI's bounds are a
 // floating-point-style *compressed* encoding that can genuinely lose
 // precision. Veda-Core's `Length` field (Section 2) is a plain,
-// uncompressed 16-bit value with no such compression -- every value in
-// [0, 65535] is exactly representable, so "not exactly representable"
-// cannot occur here at all. The two instructions are therefore
+// uncompressed 20-bit value (widened from 16 bits, 2026-08-19) with no
+// such compression -- every value in [0, 1048575] is exactly
+// representable, so "not exactly representable" cannot occur here at all
+// (widening did not introduce compression, re-checked against the new
+// width, not merely assumed to still hold). The two instructions are therefore
 // behaviorally identical in this implementation (both soft-fail
 // identically on the one real failure mode this field design has --
 // exceeding cs1's own current window, or cs1 being sealed) -- not an
@@ -195,7 +199,7 @@ function veda_setbounds(rs2 : regidx, rs1 : vcapidx, rd : vcapidx) -> unit = {
   let new_cap : capability = struct {
     Object_ID = cap.Object_ID,
     Base      = cap.Base + zero_extend(cap.Offset),
-    Length    = new_length[15..0],
+    Length    = new_length[19..0],
     Offset    = zeros(),
     Perms     = cap.Perms,
     otype     = cap.otype,
@@ -241,6 +245,32 @@ mapping clause assembly = VEDA_CSETBOUNDSEXACT(rs2, rs1, rd)
 // UNSEALED_OTYPE (0xFFFF), since using 0xFFFF as a "sealed" otype would
 // silently alias the UNSEALED sentinel, a real, meaningful check, not a
 // mechanical copy of CHERI's own max_otype bound.
+//
+// otype-width mismatch, 2026-08-19 (NEXT_STEPS_ROADMAP.md, "a thorough
+// pre-implementation audit" -- CSeal/CUnseal Offset<->otype coupling
+// finding): Offset widened to 20 bits alongside Length, but `otype`
+// (veda_types.sail's capability struct) deliberately did NOT widen -- it
+// stays 16 bits, matching real CHERI's own otype width, which is a
+// function of the *sealing/compartment* address space, not the *object
+// bounds* address space these fields otherwise share. CSeal's own
+// `otype = cs2.Offset` assignment (below) is therefore a real, narrowing
+// truncation from bits(20) to bits(16), not a same-width copy anymore.
+// Silently truncating (`cs2.Offset[15..0]` with no gate) would let two
+// distinct Offset values that differ only in bits[19..16] (e.g. 0x00005
+// and 0x10005) alias to the identical otype -- a genuine type-confusion
+// risk: CUnseal presented with either forged Offset would appear to
+// authorize the same sealed capability. Fixed by making
+// "cs2.Offset[19..16] == 0" an explicit precondition of `authorized`
+// below, folded into the existing soft-fail (tag-clear) path CSeal's
+// authorization failures already use -- not a new mechanism, reusing the
+// one this function already had. CUnseal/OCJALR (their own sites, further
+// down) take the opposite, equally-correct approach for their own
+// *comparison* (not truncation) use of cs2.Offset/otype: compare against
+// `zero_extend(cs1.otype)` (16->20 bits) instead of truncating cs2.Offset
+// -- mathematically equivalent (equality can only hold if cs2.Offset's
+// upper 4 bits are already zero, since a zero-extended 16-bit value never
+// has them set), and simpler at a read site than repeating the same
+// explicit precondition a second time.
 union clause instruction = VEDA_CSEAL   : (vcapidx, vcapidx, vcapidx)
 union clause instruction = VEDA_CUNSEAL : (vcapidx, vcapidx, vcapidx)
 
@@ -272,8 +302,9 @@ function clause execute VEDA_CSEAL(rs2, rs1, rd) = {
   let authorized : bool =
     CTag(cs2idx) & not(isSealedCap(cs2)) & permBit(cs2.Perms, PERM_SEAL)
     & (unsigned(cs2.Offset) < unsigned(cs2.Length))
-    & (cs2.Offset != UNSEALED_OTYPE)
-    & (cs2.Offset != VEDA_OTYPE_SENTRY);
+    & (cs2.Offset[19..16] == 0b0000)
+    & (cs2.Offset[15..0] != UNSEALED_OTYPE)
+    & (cs2.Offset[15..0] != VEDA_OTYPE_SENTRY);
   // An already-untagged or already-sealed cs1 can't be (re-)sealed --
   // "if cs1 was already sealed" from the spec text, plus the same
   // untagged-source-can't-produce-a-valid-result reasoning already
@@ -285,7 +316,7 @@ function clause execute VEDA_CSEAL(rs2, rs1, rd) = {
     Length    = cs1.Length,
     Offset    = cs1.Offset,
     Perms     = cs1.Perms,
-    otype     = cs2.Offset,
+    otype     = cs2.Offset[15..0],
     Reserved  = cs1.Reserved,
   };
   let rdno = vcapidx_to_vcapno(rd);
@@ -303,9 +334,13 @@ function clause execute VEDA_CUNSEAL(rs2, rs1, rd) = {
   // Permit_Unseal-carrying, and its Offset must exactly match cs1's
   // current otype (the type-authority proving it's allowed to unseal
   // *this specific* sealed type), within cs2's own bounds.
+  // cs2.Offset (bits(20)) vs cs1.otype (bits(16)): compare against
+  // zero_extend(cs1.otype), not a truncated cs2.Offset -- see CSeal's own
+  // comment above for why this direction is the correct one for a
+  // comparison (rather than truncation) site.
   let authorized : bool =
     CTag(cs2idx) & not(isSealedCap(cs2)) & permBit(cs2.Perms, PERM_UNSEAL)
-    & isSealedCap(cs1) & (cs2.Offset == cs1.otype)
+    & isSealedCap(cs1) & (cs2.Offset == zero_extend(cs1.otype))
     & (unsigned(cs2.Offset) < unsigned(cs2.Length));
   let ok : bool = authorized & CTag(cs1idx);
   let new_cap : capability = struct {
@@ -568,7 +603,10 @@ function clause execute VEDA_OCJALR(rs2, rs1) = {
   else if not(isSealedCap(cs1)) then veda_trap(rs1, VEDA_CAUSE_SEAL_VIOLATION)
   else if isSealedCap(cs2) then veda_trap(rs2, VEDA_CAUSE_SEAL_VIOLATION)
   else if not(permBit(cs2.Perms, PERM_UNSEAL)) then veda_trap(rs2, VEDA_CAUSE_SEAL_VIOLATION)
-  else if cs2.Offset != cs1.otype then veda_trap(rs1, VEDA_CAUSE_TYPE_VIOLATION)
+  // cs2.Offset (bits(20)) vs cs1.otype (bits(16)): compare against
+  // zero_extend(cs1.otype), matching CUnseal's own identical fix above --
+  // see CSeal's comment for the full reasoning.
+  else if cs2.Offset != zero_extend(cs1.otype) then veda_trap(rs1, VEDA_CAUSE_TYPE_VIOLATION)
   else if not(permBit(cs1.Perms, PERM_EXECUTE)) then veda_trap(rs1, VEDA_CAUSE_PERM_EXECUTE_VIOLATION)
   else {
     let target : xlenbits = zero_extend(cs1.Base) + zero_extend(cs1.Offset);

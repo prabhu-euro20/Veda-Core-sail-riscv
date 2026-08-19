@@ -127,32 +127,47 @@ mapping clause encdec = VEDA_OCS_C(rs2, rs1, rd)
   <-> 0b0000001 @ encdec_reg(rs2) @ 0b0 @ encdec_vcap(rs1) @ 0b100 @ 0b0 @ encdec_vcap(rd) @ 0b0001011
   when currentlyEnabled(Ext_Veda) & xlen == 64
 
-// 16 (bytes) = 128 bits, the capability's own real width (VEDA_CORE_SPEC.md
-// Section 2) -- reuses veda_check_access unchanged, since bounds/permission/
-// tag/seal/generation checking is identical in kind to OCL.D/OCS.D, only
-// the access width differs.
+// 17 (bytes) = 136 bits, the capability's own real width (VEDA_CORE_SPEC.md
+// Section 2, widened from 16 bytes/128 bits 2026-08-19 alongside the
+// Length/Offset field widening) -- reuses veda_check_access unchanged,
+// since bounds/permission/tag/seal/generation checking is identical in
+// kind to OCL.D/OCS.D, only the access width differs.
+//
+// 32-byte alignment, hard-gated below (VEDA_CAUSE_ALIGNMENT_VIOLATION,
+// veda_bind_insts.sail): real Sail/RTL parity with the already-decided
+// RTL tag-store design (2 statically-adjacent granule writes, real
+// Yosys-verified area win over a dynamically-addressed alternative),
+// not something the tag mechanism itself strictly requires in Sail
+// (mem_metadata.sail's own __WriteRAM_Meta/__ReadRAM_Meta correctly
+// handle any start alignment, up to the real 2-granule span a 17-byte
+// access can produce). Real CHERI-RISC-V precedent: [C]LC/[C]SC also
+// require capability-aligned addresses and trap on a misaligned one.
 function clause execute VEDA_OCL_C(rs2, rs1, rd) = {
   let capidx = vcapidx_to_vcapno(rs1);
   let offset : xlenbits = X(rs2);
-  match veda_check_access(capidx, offset, 16, true, false) {
+  match veda_check_access(capidx, offset, 17, true, false) {
     Err(res) => res,
     Ok(paddr) => {
-      // read_meta = true (unlike OCL.D/OCS.D's `false` above): this is the
-      // one real access kind in this file that actually needs the
-      // memory-resident Tag, not just the 128 data bits.
-      let (data, tag) : (bits(128), mem_meta) = read_ram(Read_plain, paddr, 16, true);
-      let loaded_cap = veda_cap_unpack(data);
-      C(rd) = loaded_cap;
-      // A capability round-tripped through memory carries whatever Tag the
-      // tag store actually recorded for those bytes -- true only if a
-      // real OCL.C previously stored a tagged capability there, false for
-      // any bytes never written by OCS.C (or overwritten since by a plain
-      // OCL/OCS/NMC_ADD/Atomic access, none of which ever set the tag
-      // store) -- exactly CHERI's own real "a capability loaded from
-      // memory is only as trustworthy as what was genuinely stored there"
-      // property, not assumed true just because the load succeeded.
-      CTag(rd) = tag;
-      RETIRE_SUCCESS
+      let Physaddr(paddr_bits) = paddr;
+      if paddr_bits[4..0] != 0b00000 then veda_trap(rs1, VEDA_CAUSE_ALIGNMENT_VIOLATION)
+      else {
+        // read_meta = true (unlike OCL.D/OCS.D's `false` above): this is the
+        // one real access kind in this file that actually needs the
+        // memory-resident Tag, not just the 136 data bits.
+        let (data, tag) : (bits(136), mem_meta) = read_ram(Read_plain, paddr, 17, true);
+        let loaded_cap = veda_cap_unpack(data);
+        C(rd) = loaded_cap;
+        // A capability round-tripped through memory carries whatever Tag the
+        // tag store actually recorded for those bytes -- true only if a
+        // real OCL.C previously stored a tagged capability there, false for
+        // any bytes never written by OCS.C (or overwritten since by a plain
+        // OCL/OCS/NMC_ADD/Atomic access, none of which ever set the tag
+        // store) -- exactly CHERI's own real "a capability loaded from
+        // memory is only as trustworthy as what was genuinely stored there"
+        // property, not assumed true just because the load succeeded.
+        CTag(rd) = tag;
+        RETIRE_SUCCESS
+      }
     },
   }
 }
@@ -160,20 +175,24 @@ function clause execute VEDA_OCL_C(rs2, rs1, rd) = {
 function clause execute VEDA_OCS_C(rs2, rs1, rd) = {
   let capidx = vcapidx_to_vcapno(rs1);
   let offset : xlenbits = X(rs2);
-  match veda_check_access(capidx, offset, 16, false, true) {
+  match veda_check_access(capidx, offset, 17, false, true) {
     Err(res) => res,
     Ok(paddr) => {
-      let store_cap = C(rd);
-      let store_tag = CTag(rd);
-      let packed : bits(128) = veda_cap_pack(store_cap);
-      // The store's own Tag is written to the tag store alongside the 128
-      // data bits -- an untagged (CTag(rd)=false) capability register
-      // still stores its raw field bits (matching CHERI's own real
-      // behavior: storing an invalid capability is legal, it just can't
-      // be loaded back as valid), but the tag store correctly records
-      // "not a real capability" for those bytes.
-      let _ = write_ram(Write_plain, paddr, 16, packed, store_tag);
-      RETIRE_SUCCESS
+      let Physaddr(paddr_bits) = paddr;
+      if paddr_bits[4..0] != 0b00000 then veda_trap(rs1, VEDA_CAUSE_ALIGNMENT_VIOLATION)
+      else {
+        let store_cap = C(rd);
+        let store_tag = CTag(rd);
+        let packed : bits(136) = veda_cap_pack(store_cap);
+        // The store's own Tag is written to the tag store alongside the 136
+        // data bits -- an untagged (CTag(rd)=false) capability register
+        // still stores its raw field bits (matching CHERI's own real
+        // behavior: storing an invalid capability is legal, it just can't
+        // be loaded back as valid), but the tag store correctly records
+        // "not a real capability" for those bytes.
+        let _ = write_ram(Write_plain, paddr, 17, packed, store_tag);
+        RETIRE_SUCCESS
+      }
     },
   }
 }
@@ -358,7 +377,19 @@ function clause execute VEDA_ODT_POPULATE(rs2, rs1, rd) = {
       odt_write(object_id, struct {
         valid      = true,
         Base       = descriptor[63..32],
-        Length     = descriptor[31..16],
+        // Plain VEDA_ODT_POPULATE's own 64-bit GPR descriptor encoding is
+        // deliberately UNCHANGED by the 2026-08-19 Length/Offset widening
+        // (NEXT_STEPS_ROADMAP.md, "Break 3") -- it still packs a 16-bit
+        // Length into descriptor[31..16], explicitly capping this
+        // instruction at <=65,536-byte objects rather than growing the
+        // GPR-descriptor encoding to fit 20 bits (which would no longer
+        // fit Base(32)+Length(20)+Perms(16)=68 bits in one 64-bit GPR at
+        // all). Larger objects must use VEDA_ODT_POPULATE_FAST below,
+        // whose Length comes from the already-widened veda_attr CSR
+        // instead of a GPR. zero_extend, not a same-width copy -- the
+        // field itself is bits(20) now, this instruction's own real
+        // range is just a proper subset of it.
+        Length     = zero_extend(descriptor[31..16]),
         Perms      = descriptor[15..0],
         generation = new_generation,
         // Milestone 12 (in progress): a (re)populated slot always resets
@@ -418,7 +449,12 @@ mapping clause assembly = VEDA_ODT_DESTROY(rs1, rd)
 // Length/Perms come from `veda_attr` (veda_regs.sail, CSR 0x7C4) --
 // intended for the real, common case of multiple objects sharing one
 // size/permission template, the same real pattern the IMMEDIATE_LIMIT
-// benchmark's "optimized" program already used in software. Same
+// benchmark's "optimized" program already used in software.
+// `veda_attr` widened bits(32)->bits(36) (2026-08-19, alongside the
+// Length/Offset widening, veda_regs.sail) precisely so this fast path --
+// unlike plain VEDA_ODT_POPULATE above -- is NOT subject to the 64KB
+// cap: Length now comes from veda_attr[35..16] (20 bits), not a 16-bit
+// GPR-descriptor slice. Same
 // Custom-0 major opcode, funct3 = 000 (grouping with the Populate
 // family), funct7 = 0000100 -- the next genuinely free slot, verified by
 // grepping every existing $is_veda_* decode condition in veda_core.tlv
@@ -454,7 +490,7 @@ function clause execute VEDA_ODT_POPULATE_FAST(rs2, rs1, rd) = {
       odt_write(object_id, struct {
         valid      = true,
         Base       = base,
-        Length     = veda_attr[31..16],
+        Length     = veda_attr[35..16],
         Perms      = veda_attr[15..0],
         generation = new_generation,
         owner_hart = VEDA_OWNER_UNOWNED,

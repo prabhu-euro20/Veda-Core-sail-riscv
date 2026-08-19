@@ -227,11 +227,12 @@ std::string gdb_handler::handle_read_registers() {
     reply += to_hex_le64(m_cb->gpr(i));
   }
   reply += to_hex_le64(m_cb->pc());
-  // Capability registers c0-c15: the real, hardware-packed 128 bits
-  // (veda_cap_pack -- the same function OCL.C/OCS.C themselves use, not
-  // a hand-rolled re-encoding), one register at a time.
+  // Capability registers c0-c15: the real, hardware-packed 136 bits (17
+  // bytes, widened from 128/16 alongside the 2026-08-19 Length/Offset
+  // widening -- veda_cap_pack, the same function OCL.C/OCS.C themselves
+  // use, not a hand-rolled re-encoding), one register at a time.
   for (int i = 0; i < 16; ++i) {
-    uint8_t bytes[16];
+    uint8_t bytes[17];
     m_model.pack_veda_capability_reg(i, bytes);
     for (uint8_t b : bytes) {
       reply += to_hex_byte(b);
@@ -239,9 +240,9 @@ std::string gdb_handler::handle_read_registers() {
   }
   // Tag bits, exposed as their own single-byte pseudo-registers (real
   // CHERI-GDB precedent: capability tags are shown as a separate `.t`
-  // pseudo-register rather than folded into the 128-bit value, since the
+  // pseudo-register rather than folded into the 136-bit value, since the
   // tag is genuinely out-of-band -- VEDA_CORE_SPEC.md Section 2 itself
-  // states this: "Not counted in the 128").
+  // states this: "Not counted in the 136").
   for (int i = 0; i < 16; ++i) {
     reply += to_hex_byte(m_model.read_veda_capability_tag(i) ? 1 : 0);
   }
@@ -331,16 +332,19 @@ std::string gdb_handler::build_target_description_xml() {
   }
   xml << "    <reg name=\"pc\" bitsize=\"64\" regnum=\"32\" type=\"code_ptr\"/>\n";
   xml << "  </feature>\n";
-  // Veda-Core's own 16-entry, 128-bit capability register file, plus the
-  // real, out-of-band tag bits as separate single-byte pseudo-registers
-  // (VEDA_CORE_SPEC.md Section 2: the tag is "not counted in the 128" --
-  // real CHERI-GDB's own precedent for exactly this, per this project's
-  // earlier GDB-precedent research, uses the same separate-pseudo
-  // -register convention rather than folding the tag into the value).
+  // Veda-Core's own 16-entry, 136-bit capability register file (widened
+  // from 128 bits/16 bytes to 136 bits/17 bytes, 2026-08-19, alongside
+  // the Length/Offset field widening -- veda_types.sail's own
+  // veda_cap_pack/unpack), plus the real, out-of-band tag bits as
+  // separate single-byte pseudo-registers (VEDA_CORE_SPEC.md Section 2:
+  // the tag is "not counted in the 136" -- real CHERI-GDB's own precedent
+  // for exactly this, per this project's earlier GDB-precedent research,
+  // uses the same separate-pseudo-register convention rather than folding
+  // the tag into the value).
   xml << "  <feature name=\"org.veda-core.capabilities\">\n";
-  xml << "    <vector id=\"v128\" type=\"uint8\" count=\"16\"/>\n";
+  xml << "    <vector id=\"v136\" type=\"uint8\" count=\"17\"/>\n";
   for (int i = 0; i < 16; ++i) {
-    xml << "    <reg name=\"c" << i << "\" bitsize=\"128\" type=\"v128\" regnum=\"" << (33 + i) << "\"/>\n";
+    xml << "    <reg name=\"c" << i << "\" bitsize=\"136\" type=\"v136\" regnum=\"" << (33 + i) << "\"/>\n";
   }
   for (int i = 0; i < 16; ++i) {
     xml << "    <reg name=\"c" << i << "_tag\" bitsize=\"8\" type=\"uint8\" regnum=\"" << (49 + i) << "\"/>\n";

@@ -524,13 +524,14 @@ uint64_t ModelImpl::mepc() const {
   return zmepc.bits;
 }
 
-void ModelImpl::pack_veda_capability_reg(int index, uint8_t out_bytes[16]) {
-  std::fill(out_bytes, out_bytes + 16, 0);
+void ModelImpl::pack_veda_capability_reg(int index, uint8_t out_bytes[17]) {
+  std::fill(out_bytes, out_bytes + 17, 0);
   hart::zcapability c = zrC(static_cast<int64_t>(index));
   lbits packed;
   CREATE(lbits)(&packed);
   zveda_cap_pack(&packed, c);
-  /* packed.len is 128 (bits); mpz_export might not write all trailing
+  /* packed.len is 136 (bits), widened from 128 alongside the 2026-08-19
+   * Length/Offset field widening; mpz_export might not write all trailing
    * zero bytes, matching the same real caveat rvfi_dii.cpp's own
    * get_and_send_packet already documents for this identical pattern. */
   mpz_export(out_bytes, nullptr, -1, 1, 0, 0, *(packed.bits));

@@ -63,6 +63,30 @@ let VEDA_CAUSE_OWNER_VIOLATION : bits(5) = 0b00110 // 0x06
 // vcapidx, since no real capability register is involved in either
 // triggering condition).
 let VEDA_CAUSE_PURECAP_VIOLATION : bits(5) = 0b00111 // 0x07
+// Milestone: Length/Offset widening (NEXT_STEPS_ROADMAP.md, 2026-08-19) --
+// the next genuinely free cause value (0x08, confirmed via a full grep of
+// every VEDA_CAUSE_* constant in this file before picking it, matching
+// this file's own established "verify before deciding" convention for
+// every prior cause-code addition). Real precedent, not invented: real
+// CHERI-RISC-V requires capability-load/store addresses to be capability
+// -aligned and traps on a misaligned one (CHERI ISA spec's own [C]LC/
+// [C]SC alignment requirement). Veda-Core's own capability width grew
+// from 16 to 17 bytes this pass -- a 17-byte access can span at most 2
+// of mem_metadata.sail's own real, unchanged 16-byte tag-store granules
+// (verified directly: floor((17-1)/16)+1 = 2, for ANY start alignment),
+// so the tag mechanism itself does not strictly REQUIRE this gate to
+// stay correct. It exists instead for real Sail/RTL parity: the
+// project's own already-decided RTL design (NEXT_STEPS_ROADMAP.md's
+// "thorough pre-implementation audit" entry) fixes the tag-store write
+// to exactly 2 statically-known-adjacent granules for real hardware
+// -simplicity/area reasons (Yosys-verified: 7.2x cheaper than a
+// dynamically-addressed fine-granule alternative), which only stays
+// correct if every real capability-store address is 32-byte aligned.
+// Gating this in Sail now, ahead of the RTL mirror, means Sail's own
+// reference behavior already matches what RTL will enforce -- avoiding
+// exactly the kind of Sail/RTL behavioral divergence this project's own
+// "Sail-first-then-RTL" sequencing discipline exists to prevent.
+let VEDA_CAUSE_ALIGNMENT_VIOLATION : bits(5) = 0b01000 // 0x08
 
 function veda_xtval(cap_idx : bits(4), cause : bits(5)) -> xlenbits = {
   // Deliberately avoids the two-argument `zero_extend(bits, width)` form --

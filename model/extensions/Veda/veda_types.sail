@@ -44,23 +44,31 @@ mapping vcap_name : bits(4) <-> string = {
 }
 
 // The capability register's field layout, VEDA_CORE_SPEC.md Section 2:
-//   Tag(1, out-of-band) + Object_ID(23) + Base(32) + Length(16) + Offset(16)
-//   + Perms(16) + otype(16) + Reserved(8) = 127, +1 padding = 128 bits.
+//   Tag(1, out-of-band) + Object_ID(23) + Base(32) + Length(20) + Offset(20)
+//   + Perms(16) + otype(16) + Reserved(8) = 135, +1 padding = 136 bits.
 // Object_ID widened from 16 to 23 bits, and Reserved narrowed from 15 to 8
 // (now fully consumed by the generation counter, no spare bits), in the
 // post-Milestone-V-A scaling-barrier research pass -- see
 // veda-core/SCALING_BARRIERS_RESEARCH.md Section 3 for the bit-budget
 // arithmetic and veda-core/VEDA_CORE_SPEC.md Section 2 for the spec change
 // this mirrors exactly.
+// Length/Offset widened 16->20 bits, 2026-08-19 (NEXT_STEPS_ROADMAP.md,
+// "DECIDED, 2026-08-19: the widening's real blast radius" and the same-day
+// follow-up audit entry that reduced the target from 24 to 20 bits after
+// real embedded-MCU SRAM/Flash evidence showed a 16 MiB ceiling was
+// disproportionate to this line's own "modest, data-structure-sized
+// object" philosophy -- 1 MiB, the new ceiling, matches real high-end
+// Cortex-M7-class on-chip SRAM instead of an internal simulation constant).
+// Base/Perms/otype/Reserved are explicitly NOT part of this widening.
 // Tag is modeled separately (crTags, veda_regs.sail) since it is
-// out-of-band and not part of the 128-bit value, matching how mem_meta
+// out-of-band and not part of the 136-bit value, matching how mem_meta
 // (core/mem_metadata.sail) keeps the memory-resident tag out-of-band from
 // data too.
 struct capability = {
   Object_ID : bits(23),
   Base      : bits(32),
-  Length    : bits(16),
-  Offset    : bits(16),
+  Length    : bits(20),
+  Offset    : bits(20),
   Perms     : bits(16),
   otype     : bits(16),
   Reserved  : bits(8),
@@ -94,26 +102,27 @@ let zero_capability : capability = struct {
 
 function isSealedCap(c : capability) -> bool = c.otype != UNSEALED_OTYPE
 
-// Pack/unpack a capability to/from its real 128-bit memory representation
+// Pack/unpack a capability to/from its real 136-bit memory representation
 // -- Milestone 7 (OCL.C/OCS.C, VEDA_CORE_SPEC.md's own field order and bit
-// budget, Section 2: "Object_ID(23)+Base(32)+Length(16)+Offset(16)+
-// Perms(16)+otype(16)+Reserved(8) = 127, +1 padding bit = 128"). Packed
-// MSB-to-LSB in the same order the spec's own field table lists them, with
-// the single pad bit as the true LSB (bit 0) -- an arbitrary but fixed,
-// self-consistent choice, since the spec names a padding bit but never
-// assigns it a position. Tag is deliberately NOT part of this 128-bit
-// value (Section 2: "out-of-band... not counted in the 128") -- it is
-// packed/unpacked separately, via mem_meta (core/mem_metadata.sail),
-// exactly mirroring how it is already kept separate from the capability
-// register's own 128 data bits (crTags, veda_regs.sail).
-function veda_cap_pack(c : capability) -> bits(128) =
+// budget, Section 2, as revised 2026-08-19 for the Length/Offset widening:
+// "Object_ID(23)+Base(32)+Length(20)+Offset(20)+Perms(16)+otype(16)+
+// Reserved(8) = 135, +1 padding bit = 136"). Packed MSB-to-LSB in the same
+// order the spec's own field table lists them, with the single pad bit as
+// the true LSB (bit 0) -- an arbitrary but fixed, self-consistent choice,
+// since the spec names a padding bit but never assigns it a position. Tag
+// is deliberately NOT part of this 136-bit value (Section 2: "out-of-
+// band... not counted in the 136") -- it is packed/unpacked separately,
+// via mem_meta (core/mem_metadata.sail), exactly mirroring how it is
+// already kept separate from the capability register's own 136 data bits
+// (crTags, veda_regs.sail).
+function veda_cap_pack(c : capability) -> bits(136) =
   c.Object_ID @ c.Base @ c.Length @ c.Offset @ c.Perms @ c.otype @ c.Reserved @ 0b0
 
-function veda_cap_unpack(v : bits(128)) -> capability = struct {
-  Object_ID = v[127..105],
-  Base      = v[104..73],
-  Length    = v[72..57],
-  Offset    = v[56..41],
+function veda_cap_unpack(v : bits(136)) -> capability = struct {
+  Object_ID = v[135..113],
+  Base      = v[112..81],
+  Length    = v[80..61],
+  Offset    = v[60..41],
   Perms     = v[40..25],
   otype     = v[24..9],
   Reserved  = v[8..1],
@@ -153,7 +162,12 @@ function permBit(perms : bits(16), b : range(0,15)) -> bool = perms[b] == 0b1
 // The Object Descriptor Table entry, VEDA_CORE_SPEC.md Section 5.1: flat,
 // single-level, system-wide, indexed directly by the 23-bit Object_ID
 // (widened from 16 bits this pass, see the `capability` struct comment
-// above). Generation narrowed from 15 to 8 bits this same pass -- no
+// above). `Length` widened 16->20 bits, 2026-08-19, to match the
+// capability struct's own Length widening -- an ODT entry that could not
+// represent the full range a live capability's Length field can now hold
+// would silently truncate at Bind time, exactly the kind of aliasing bug
+// this project's own discipline treats as unacceptable. Generation
+// narrowed from 15 to 8 bits this same pass -- no
 // longer "the simplest choice," now a deliberate match to CHERI-D's real,
 // empirically-derived per-allocation generation-counter width (arXiv
 // 2606.19055; veda-core/SCALING_BARRIERS_RESEARCH.md Section 3/6). No
@@ -174,7 +188,7 @@ let VEDA_OWNER_UNOWNED : bits(8) = 0xFF
 struct odt_entry = {
   valid      : bool,
   Base       : bits(32),
-  Length     : bits(16),
+  Length     : bits(20),
   Perms      : bits(16),
   generation : bits(8),
   owner_hart : bits(8),

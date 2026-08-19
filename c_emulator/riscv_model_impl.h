@@ -113,7 +113,7 @@ public:
   // already-verified hardware packing (veda_cap_pack, the same function
   // OCL.C/OCS.C use for capability-width memory access), not a
   // hand-rolled re-encoding.
-  void pack_veda_capability_reg(int index, uint8_t out_bytes[16]);
+  void pack_veda_capability_reg(int index, uint8_t out_bytes[17]);
   bool read_veda_capability_tag(int index);
 
   // write access to model state
