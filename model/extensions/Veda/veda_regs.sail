@@ -282,6 +282,35 @@ val veda_crbr_release : unit -> unit
 // break the one path R12 was written for.
 register veda_invoke_since_trap : bits(8)
 
+// ═══ R50 INCREMENT 2 -- THE CROSSING'S RETAIN MASK ═══
+//
+// R50 measured the possession channel and left it open, because the fix
+// "defines an ABI, not just a check": OCInvoke's only capability write is the
+// IDC, OCReturn writes none, and the dereference checker has ZERO domain terms,
+// so a callee needs no authority at all -- it uses a register the caller left
+// bound. R48 closed the mint channel; this closes the possession one.
+//
+// THE ABI. Bit i set means capability register i SURVIVES the next crossing.
+// Everything else is cleared.
+//
+// A CSR AND NOT AN ENCODING FIELD, and that is a correction implementation
+// forced. The first design put the mask in the crossing's reserved-zero field --
+// OCInvoke's rd, OCReturn's rs2 -- and it built and passed on Sail. It died on
+// the RTL: OCInvoke's two operand fields BOTH name capability registers, so
+// there is no spare GPR read port for a third source, and adding one is a third
+// integer read port on the WHOLE register file, not a cost local to this
+// instruction. A model with no port pressure cannot feel that -- the same
+// asymmetry DESIGN_08 warns about for the ODT.
+//
+// The CSR is better on three further counts: the encodings do not change at all,
+// so R30(b)'s reserved-zero rule and p8_reserved_bits.S are untouched rather
+// than relaxed; and it is SELF-CONSUMING, so a mask cannot survive to apply
+// silently to a later crossing -- the shape R60 had to fix for the CRBR shadow.
+//
+// FAIL-SAFE BY CONSTRUCTION: never written means zero means retain NOTHING.
+// Silence means clear, never leak.
+register veda_xretain : bits(16)
+
 register veda_mfaultobj : bits(44)
 // The staging flag exists so the chokepoint can tell "nothing was staged this
 // trap" from "the object staged happens to be zero". Same reason the CRBR shadow
@@ -340,6 +369,9 @@ function veda_pcc_save_and_reset() -> unit = {
   // and for the reason the comment above gives: per-site additions miss paths.
   // Any trap whose instruction did not STAGE a name reports the sentinel, so a
   // name can never survive from one trap into the next.
+  // R50 increment 2: a retain mask never survives a trap. A handler's own
+  // crossing must not inherit whatever the interrupted code had staged.
+  veda_xretain = zeros();
   if not(veda_fault_obj_staged) then veda_mfaultobj = VEDA_OBJECT_NONE;
   veda_fault_obj_staged = false;
 }
@@ -591,6 +623,7 @@ mapping clause csr_name_map = 0x7C5 <-> "veda_mode"
 mapping clause csr_name_map = 0x7C6 <-> "veda_current_region"
 mapping clause csr_name_map = 0x7C7 <-> "veda_saved_region"
 mapping clause csr_name_map = 0x7C9 <-> "veda_mfaultobj"
+mapping clause csr_name_map = 0x7CA <-> "veda_xretain"
 // R12: read-only status for the trap-nesting state. Without it the depth
 // and poison bits are architecturally invisible, and a handler cannot tell
 // WHY a return was denied. Read-only by construction, following 0x7C6/7:
@@ -610,6 +643,7 @@ function clause is_CSR_accessible(0x7C5, _, _) = currentlyEnabled(Ext_Veda)
 function clause is_CSR_accessible(0x7C6, _, access_type) = currentlyEnabled(Ext_Veda) & (access_type == CSRRead)
 function clause is_CSR_accessible(0x7C7, _, access_type) = currentlyEnabled(Ext_Veda) & (access_type == CSRRead)
 function clause is_CSR_accessible(0x7C9, _, access_type) = currentlyEnabled(Ext_Veda) & (access_type == CSRRead)
+function clause is_CSR_accessible(0x7CA, _, _) = currentlyEnabled(Ext_Veda)
 function clause is_CSR_accessible(0x7C8, _, access_type) = currentlyEnabled(Ext_Veda) & (access_type == CSRRead)
 
 function clause read_CSR(0x7C0) = veda_to_xlen(zero_extend(veda_pcc_base))
@@ -1207,6 +1241,8 @@ function clause read_CSR(0x7C7) = zero_extend(veda_saved_region)
 // widened into mtval, whose low ten bits are already load-bearing (vc_cow_repair.S
 // does `srli x18, x25, 5` on them).
 function clause read_CSR(0x7C9) = veda_to_xlen(zero_extend(veda_mfaultobj))
+function clause read_CSR(0x7CA) = veda_to_xlen(zero_extend(veda_xretain))
+function clause write_CSR(0x7CA, value : xlenbits) = { veda_xretain = value[15 .. 0]; Ok(zero_extend(veda_xretain)) }
 // {poison, depth}: bit 8 is poison, bits 7..0 are the depth.
 function clause read_CSR(0x7C8) = zero_extend([bool_to_bit(veda_trap_poison)] @ veda_trap_depth)
 

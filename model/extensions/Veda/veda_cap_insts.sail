@@ -444,6 +444,21 @@ mapping clause assembly = VEDA_CSEALENTRY(rs1, rd)
 // as 0, matching this file's own established "dest-kind" funct3=001
 // R-type shape used by OCA/CSetBounds/CSeal/CUnseal but with no actual
 // destination register consumed.
+// R50 increment 2: clear every capability register the retain mask does not
+// name, then CONSUME the mask. Self-consuming is the load-bearing half -- a mask
+// that survived would apply silently to the next crossing, the shape R60 had to
+// fix for the CRBR shadow.
+function veda_crossing_clear() -> unit = {
+  let retain : bits(16) = veda_xretain;
+  veda_xretain = zeros();
+  foreach (i from 0 to 15) {
+    if retain[i] == bitzero then {
+      wC(Vcapno(i), zero_capability);
+      wCTag(Vcapno(i), false)
+    }
+  }
+}
+
 union clause instruction = VEDA_OCINVOKE : (vcapidx, vcapidx)
 
 mapping clause encdec = VEDA_OCINVOKE(rs2, rs1)
@@ -585,6 +600,8 @@ function clause execute VEDA_OCINVOKE(rs2, rs1) = {
       generation = cs2.generation,
       flags      = cs2.flags,
     };
+    // Clear BEFORE the IDC install, so c15 survives by construction.
+    veda_crossing_clear();
     wC(VEDA_IDC_INDEX, unsealed_cs2);
     wCTag(VEDA_IDC_INDEX, true);
     // Milestone 14: narrow the live compartment to cs1's own bounds --
@@ -908,6 +925,9 @@ function clause execute VEDA_OCRETURN(rs1) = {
     // R10: reload the CRBR for the domain being re-entered, exactly as
     // OCInvoke does on the way in -- return is a real compartment-boundary
     // crossing (the SSC clear below already records that lesson).
+    // The return leg clears too, and c15 is NOT exempt: OCRETURN installs no
+    // IDC, so a surviving one hands the callee's own data capability back.
+    veda_crossing_clear();
     veda_crbr_load((cs1.Object_ID)[43 .. 24]);
     // D5: and release the saved shadow the trap entry left behind. The region
     // has just been installed from cs1 on the line above, so a saved one is
