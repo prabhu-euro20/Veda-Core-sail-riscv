@@ -261,15 +261,65 @@ function veda_check_access(capidx : vcapno, offset : xlenbits, width : int, need
   }
 }
 
+// ═══ R84 -- A CAPABILITY MUST BE ABLE TO REACH A DEVICE ════════════════════
+//
+// These two used to call read_ram/write_ram DIRECTLY. That was deliberate --
+// postlude/step_ext.sail explains it kept purecap's own hook off the capability
+// path -- and it had a consequence nobody noticed: MMIO routing lives ONE LAYER
+// UP, in the checked path at sys/mem.sail:461, which splits
+//     if within_mmio_writable(paddr, w) then mmio_write(...) else write_ram(...)
+// and within_mmio_writable covers the CLINT, the signature region and HTIF
+// (sys/platform.sail:354-357). So a capability access reached RAM AND NOTHING
+// ELSE, while purecap forbids the ordinary accesses that CAN reach a device.
+// A Veda machine under purecap had no console, no timer, and no way to say it
+// had finished.
+//
+// MEASURED, not reasoned about: sail_tests/poc_r84_purecap_has_no_io.S runs its
+// whole steady state under purecap -- capability store and load both work, an
+// ordinary ld is refused with cause 0x07 -- reaches its halt, signals through
+// OCS.D, and then spins forever because HTIF never sees it.
+//
+// THE FIX ADDS NO NEW MECHANISM. mem_read_priv_meta / mem_write_value_priv_meta
+// are the upstream checked path, and they are ALREADY BOTH tag-carrying (the
+// else-branch above passes `meta` straight to write_ram) and MMIO-aware. Four
+// risks were checked at source BEFORE this edit rather than after:
+//   - PMP: checked_mem_read runs pmpCheck, which would have failed every
+//     User-mode capability access in a machine with no PMP entries. It does not:
+//     `if sys_pmp_count == 0 then return None()` (pmp/pmp_control.sail:120) and
+//     this project's config sets "count": 0.
+//   - the purecap hook: ext_data_get_addr is called ONLY from
+//     sys/vmem_utils.sail:282, inside the VIRTUAL path. mem_*_priv_meta takes a
+//     physical address and never reaches it, so step_ext.sail's claim that the
+//     hook is unreachable from a legitimate Veda access REMAINS TRUE.
+//   - address translation: vmem_read/vmem_read_addr are NOT used and must not
+//     be -- they translate, split pages and handle misalignment, none of which
+//     Veda may do, since veda_check_access already produced a PHYSICAL address
+//     from the object's own bounds.
+//   - widths: on RV64 physaddrbits and xlenbits are both 64 (core/xlen.sail:22,
+//     core/mem_addrtype.sail:15-16). The TYPE CHECKER still refuses Virtaddr(a)
+//     directly, because it must prove (if xlen == 32 then 34 else 64) == xlen for
+//     ALL xlen, and Veda's RV64-only gate (R70) is a runtime condition it cannot
+//     see. veda_to_xlen(zero_extend(a)) is this file's own established
+//     conversion (veda_types.sail:185, used at veda_regs.sail:657-658), and it is
+//     exact on RV64 -- a truncation to 64 of a 64-bit value.
+//
+// DECISION 1 (DESIGN_07 R84): a device-side error surfaces as the STANDARD
+// access fault, never a Veda cause. Every Veda cause answers "you were not
+// permitted"; a device error answers "it did not work", and conflating them lets
+// software read a malfunction as an authority denial. Same reasoning as R64's
+// separate fault CSR. No new Veda cause code is allocated -- memory_exception
+// carries the upstream ExceptionType, with the physical address in mtval.
 function clause execute VEDA_OCL(rs2, rs1, rd) = {
   let capidx = vcapidx_to_vcapno(rs1);
   let offset : xlenbits = X(rs2);
   match veda_check_access(capidx, offset, xlen_bytes, true, false, false, false) {
     Err(res) => res,
     Ok(paddr) => {
-      let (data, _) : (xlenbits, mem_meta) = read_ram(Read_plain, paddr, xlen_bytes, false);
-      X(rd) = data;
-      RETIRE_SUCCESS
+      match mem_read_priv_meta(Load(Data), PBMT_PMA, cur_privilege, paddr, xlen_bytes,
+                               false, false, false, false) {
+        Ok((data, _)) => { X(rd) = data; RETIRE_SUCCESS },
+        Err((Physaddr(a), e)) => memory_exception(Virtaddr(veda_to_xlen(zero_extend(a))), e),
+      }
     },
   }
 }
@@ -281,8 +331,11 @@ function clause execute VEDA_OCS(rs2, rs1, rd) = {
     Err(res) => res,
     Ok(paddr) => {
       let data = X(rd);
-      let _ = write_ram(Write_plain, paddr, xlen_bytes, data, default_meta);
-      RETIRE_SUCCESS
+      match mem_write_value_priv_meta(paddr, xlen_bytes, data, Store(Data), PBMT_PMA,
+                                      cur_privilege, default_meta, false, false, false) {
+        Ok(_) => RETIRE_SUCCESS,
+        Err((Physaddr(a), e)) => memory_exception(Virtaddr(veda_to_xlen(zero_extend(a))), e),
+      }
     },
   }
 }
