@@ -87,6 +87,29 @@ let VEDA_CAUSE_PURECAP_VIOLATION : bits(5) = 0b00111 // 0x07
 // exactly the kind of Sail/RTL behavioral divergence this project's own
 // "Sail-first-then-RTL" sequencing discipline exists to prevent.
 let VEDA_CAUSE_ALIGNMENT_VIOLATION : bits(5) = 0b01000 // 0x08
+// TRAP_QUARANTINE_DESIGN.md -- the next genuinely free cause value (0x09,
+// confirmed via a full grep of every VEDA_CAUSE_* constant in this file
+// before picking it, matching this file's own established convention).
+// Fires when VEDA_OCINVOKE/VEDA_OCRETURN attempts to enter a compartment
+// (identified by otype) whose trap-tracker entry is currently quarantined
+// -- see veda_regs.sail's veda_trap_tracker_is_quarantined and the two
+// call sites in veda_cap_insts.sail.
+let VEDA_CAUSE_COMPARTMENT_QUARANTINED : bits(5) = 0b01001 // 0x09
+
+// LOCAL_FAULT_RECOVERY_DESIGN.md -- the next two genuinely free cause
+// values (0x0a/0x0b, confirmed via a full grep of every VEDA_CAUSE_*
+// constant in this file before picking them). VEDA_SET_LOCAL_HANDLER's
+// own two real failure modes, each a genuinely distinct violation kind
+// from any existing cause (neither is a bounds/tag/seal/type/perm
+// mismatch on the operand capability itself):
+//   - fired when attempted outside any live (PCC-bounded) compartment --
+//     there is no otype to register a handler against.
+//   - fired when the local-handler table is completely full AND this
+//     otype has no existing entry to overwrite -- a real, honest scope
+//     limit (LOCAL_FAULT_RECOVERY_DESIGN.md's own stated deferral), not
+//     silently evicting another compartment's registered handler.
+let VEDA_CAUSE_NO_LIVE_COMPARTMENT   : bits(5) = 0b01010 // 0x0a
+let VEDA_CAUSE_HANDLER_TABLE_FULL    : bits(5) = 0b01011 // 0x0b
 
 function veda_xtval(cap_idx : bits(4), cause : bits(5)) -> xlenbits = {
   // Deliberately avoids the two-argument `zero_extend(bits, width)` form --

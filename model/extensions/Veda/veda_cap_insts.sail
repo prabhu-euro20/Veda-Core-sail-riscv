@@ -488,7 +488,18 @@ function clause execute VEDA_OCINVOKE(rs2, rs1) = {
   else if not(permBit(cs2.Perms, PERM_INVOKE)) then veda_trap(rs2, VEDA_CAUSE_PERM_INVOKE_VIOLATION)
   else if not(permBit(cs1.Perms, PERM_EXECUTE)) then veda_trap(rs1, VEDA_CAUSE_PERM_EXECUTE_VIOLATION)
   else if permBit(cs2.Perms, PERM_EXECUTE) then veda_trap(rs2, VEDA_CAUSE_PERM_EXECUTE_VIOLATION)
+  // TRAP_QUARANTINE_DESIGN.md: checked last, after every real CHERI-
+  // precedented check above already holds -- a compartment that would
+  // otherwise legitimately be entered can still be hardware-refused here
+  // if its own recent trap history says it should not be, the real,
+  // additive security property this milestone exists to add.
+  else if veda_trap_tracker_is_quarantined(cs1.otype) then veda_trap(rs1, VEDA_CAUSE_COMPARTMENT_QUARANTINED)
   else {
+    // "Good behavior earns forgiveness": the compartment we are LEAVING
+    // (if any) just made real forward progress by reaching this success
+    // path at all -- decay its own trap count before overwriting
+    // veda_pcc_otype below with the newly-entered compartment's identity.
+    if veda_pcc_length != VEDA_PCC_UNBOUNDED then veda_trap_tracker_decay(veda_pcc_otype);
     let unsealed_cs2 : capability = struct {
       Object_ID = cs2.Object_ID,
       Base      = cs2.Base,
@@ -507,6 +518,7 @@ function clause execute VEDA_OCINVOKE(rs2, rs1) = {
     // Perms-on-PCC deliberately deferred, no real consumer exists yet).
     veda_pcc_base = cs1.Base;
     veda_pcc_length = cs1.Length;
+    veda_pcc_otype = cs1.otype;
     // SSC (Stack-Spill Capability, see veda_types.sail's veda_scr enum):
     // clear (untag) on every successful invoke, unconditionally -- a
     // hardware guarantee, not a software discipline, the identical real
@@ -682,8 +694,28 @@ function clause execute VEDA_OCRETURN(rs1) = {
   else if cs1.otype != VEDA_OTYPE_SENTRY then veda_trap(rs1, VEDA_CAUSE_SEAL_VIOLATION)
   else if not(permBit(cs1.Perms, PERM_EXECUTE)) then veda_trap(rs1, VEDA_CAUSE_PERM_EXECUTE_VIOLATION)
   else {
+    // TRAP_QUARANTINE_DESIGN.md -- real, honest scope limit found while
+    // implementing, not assumed at design time: unlike VEDA_OCINVOKE,
+    // where cs1.otype/cs2.otype is CSeal's own real per-compartment
+    // type-authority identity, OCRETURN's cs1.otype is ALWAYS the fixed
+    // VEDA_OTYPE_SENTRY sentinel (checked above) -- shared across every
+    // sentry in the system, not a per-destination identity. Reusing it as
+    // a quarantine key would wrongly treat every distinct return target
+    // as the SAME tracked "compartment," quarantining all of them
+    // together the moment any one faulted enough times. OCRETURN's own
+    // destination (a plain Base/Length region, no otype-paired identity
+    // at all -- often literally "return to the uncompartmentalized
+    // caller," Length=VEDA_PCC_UNBOUNDED) has no analogous identity to
+    // track, so this milestone deliberately does NOT quarantine-check
+    // OCRETURN targets -- named here, not silently dropped. The
+    // compartment being LEFT still earns its own decay below, correctly.
+    if veda_pcc_length != VEDA_PCC_UNBOUNDED then veda_trap_tracker_decay(veda_pcc_otype);
     veda_pcc_base = cs1.Base;
     veda_pcc_length = cs1.Length;
+    // No real per-destination identity to record (see comment above) --
+    // explicitly UNSEALED_OTYPE, not cs1.otype (which would misattribute
+    // every future fault here to the shared VEDA_OTYPE_SENTRY bucket).
+    veda_pcc_otype = UNSEALED_OTYPE;
     // SSC: clear on every successful return too, the identical reason and
     // identical mechanism as VEDA_OCINVOKE above -- OCRETURN is a real,
     // general compartment-boundary crossing (not only used inside the
@@ -697,6 +729,90 @@ function clause execute VEDA_OCRETURN(rs1) = {
 
 mapping clause assembly = VEDA_OCRETURN(rs1)
   <-> "ocreturn" ^ spc() ^ vcap_name(encdec_vcap(rs1))
+
+// LOCAL_FAULT_RECOVERY_DESIGN.md: self-registration-only. Registers
+// cs1's own cursor (Base+Offset, the identical target computation
+// VEDA_OCINVOKE/VEDA_OCRETURN already use above) as the CURRENT live
+// compartment's own local fault-recovery entry point, keyed by
+// veda_pcc_otype -- no operand names a target otype at all, which is
+// the deliberate confused-deputy guard: nothing lets one compartment
+// register a handler for a DIFFERENT compartment, since there is no way
+// to even express "someone else's otype" to this instruction.
+union clause instruction = VEDA_SET_LOCAL_HANDLER : (vcapidx)
+
+// funct7 = 0010111, the next free Custom-2/funct3=001 slot after
+// OCRETURN's own 0010110 above (verified by grep against every existing
+// user of this space before picking it). rs2 and rd are both hardwired
+// to all-zero, the identical single-source-capability-operand shape
+// OCRETURN already established -- this instruction's real output is a
+// table write (plus success/failure), not a register value.
+mapping clause encdec = VEDA_SET_LOCAL_HANDLER(rs1)
+  <-> 0b0010111 @ 0b00000 @ 0b0 @ encdec_vcap(rs1) @ 0b001 @ 0b0 @ 0b0000 @ 0b1011011
+  when currentlyEnabled(Ext_Veda)
+
+function clause execute VEDA_SET_LOCAL_HANDLER(rs1) = {
+  let cs1idx = vcapidx_to_vcapno(rs1);
+  let cs1 = C(cs1idx);
+  if not(CTag(cs1idx)) then veda_trap(rs1, VEDA_CAUSE_TAG_VIOLATION)
+  // Callable only from within a live, bounded compartment -- there is no
+  // otype to register a handler against otherwise (matches
+  // VEDA_SET_LOCAL_HANDLER's own entire premise: "MY current identity's
+  // own recovery entry point").
+  else if veda_pcc_length == VEDA_PCC_UNBOUNDED then veda_trap(rs1, VEDA_CAUSE_NO_LIVE_COMPARTMENT)
+  // Real bug found by adversarial review, not caught by this milestone's
+  // own original 4-test suite (all of which mint fresh, distinct real
+  // otypes via CSeal/OCInvoke and never exercise this state): PCC can be
+  // genuinely bounded (a live compartment's real Base/Length, correctly
+  // restored) while veda_pcc_otype STILL holds the shared UNSEALED_OTYPE
+  // sentinel -- this is not a corner case, it is the ORDINARY state after
+  // every trap+mret round trip that does not go through OCInvoke again
+  // (mret has no otype-restore arm, by design -- see veda_pcc_otype's own
+  // declaration comment) and after every VEDA_OCRETURN (which explicitly
+  // sets otype = UNSEALED_OTYPE, since a return target has no per
+  // -destination identity -- see that instruction's own comment above).
+  // Without this check, two UNRELATED compartments both resumed into this
+  // ordinary window would collide on the SAME shared table key: whichever
+  // one calls osethandler first "registers" under 0xFFFF, and the other's
+  // own next fault gets redirected into that first compartment's chosen
+  // handler address -- a real cross-compartment confused-deputy break
+  // reachable by completely ordinary program flow (confirmed: this
+  // project's own shipped veda_sched_asm.S scheduler threads are entered
+  // exclusively via OCReturn and therefore run under this exact shared
+  // identity the entire time). UNSEALED_OTYPE is a shared sentinel, not a
+  // genuine per-compartment identity, so it must never be an eligible
+  // registration key -- reusing VEDA_CAUSE_NO_LIVE_COMPARTMENT here is
+  // semantically honest: this state genuinely has no live compartment
+  // IDENTITY to register a handler against, even though PCC itself is
+  // bounded.
+  else if veda_pcc_otype == UNSEALED_OTYPE then veda_trap(rs1, VEDA_CAUSE_NO_LIVE_COMPARTMENT)
+  // Defense-in-depth, matching VEDA_OCINVOKE/VEDA_OCRETURN/VEDA_OCJALR's
+  // own identical requirement on every capability whose Base/Offset ever
+  // becomes a jump target: cs1 must carry Permit_Execute. Not strictly
+  // required for the bounds guarantee itself (the redirect always uses
+  // the compartment's own already-captured mepcc bounds, never cs1's),
+  // but this address WILL be jumped to, and every other Veda-Core
+  // instruction with that same property already checks this.
+  else if not(permBit(cs1.Perms, PERM_EXECUTE)) then veda_trap(rs1, VEDA_CAUSE_PERM_EXECUTE_VIOLATION)
+  else {
+    let target : xlenbits = zero_extend(cs1.Base) + zero_extend(cs1.Offset);
+    let target32 : bits(32) = target[31..0];
+    // Confused-deputy guard: the registered entry must lie within the
+    // CURRENT compartment's own already-live bounds -- a compartment can
+    // only ever point its own handler at its own code, never at another
+    // compartment's or the kernel's.
+    if unsigned(target32) < unsigned(veda_pcc_base)
+       | unsigned(target32) >= unsigned(veda_pcc_base) + unsigned(veda_pcc_length) then
+      veda_trap(rs1, VEDA_CAUSE_BOUNDS_VIOLATION)
+    else {
+      let ok = veda_local_handler_set(veda_pcc_otype, target32);
+      if not(ok) then veda_trap(rs1, VEDA_CAUSE_HANDLER_TABLE_FULL)
+      else RETIRE_SUCCESS
+    }
+  }
+}
+
+mapping clause assembly = VEDA_SET_LOCAL_HANDLER(rs1)
+  <-> "osethandler" ^ spc() ^ vcap_name(encdec_vcap(rs1))
 
 // OSpecialRW (VEDA_CORE_SPEC.md Section 6 item 8, formerly NEXT_STEPS_
 // ROADMAP.md §2.5): term-for-term adaptation of real CHERI's own

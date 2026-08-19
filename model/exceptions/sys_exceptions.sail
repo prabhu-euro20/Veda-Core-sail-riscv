@@ -41,6 +41,17 @@ val veda_pcc_restore_on_xret : unit -> unit
 // extensions/Veda/veda_regs.sail, right after veda_pcc_restore_on_xret.
 val veda_allows_CSR_access : (csreg, Privilege, CSRAccessType) -> bool
 
+// LOCAL_FAULT_RECOVERY_DESIGN.md: same real reason as the two forward
+// `val`s immediately above -- needs veda_local_handler_redirect_pending/
+// _target, only visible once Veda_insts is required. prepare_trap_vector
+// below is the one real function, confirmed by direct grep, that every
+// trap's actual jump target flows through (sys/sys_control.sail's
+// trap_handler, both its Machine and Supervisor arms) -- the correct,
+// minimal, single point to let a pending local-handler redirect
+// override the ordinary mtvec-computed target, rather than touching
+// trap_handler's own two call sites in that other, still-more-base file.
+val veda_trap_vector_override : xlenbits -> xlenbits
+
 // used for traps and ECALL
 function prepare_trap_vector(p : Privilege, cause : Mcause) -> xlenbits = {
   let tvec : Mtvec = match p {
@@ -50,10 +61,11 @@ function prepare_trap_vector(p : Privilege, cause : Mcause) -> xlenbits = {
     VirtualUser       => internal_error(__FILE__, __LINE__, "Hypervisor extension not supported"),
     VirtualSupervisor => internal_error(__FILE__, __LINE__, "Hypervisor extension not supported"),
   };
-  match tvec_addr(tvec, cause) {
+  let ordinary_target : xlenbits = match tvec_addr(tvec, cause) {
     Some(epc) => epc,
     None()    => internal_error(__FILE__, __LINE__, "Invalid tvec mode")
-  }
+  };
+  veda_trap_vector_override(ordinary_target)
 }
 
 // xRET handling involves three functions:

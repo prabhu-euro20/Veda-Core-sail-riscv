@@ -225,6 +225,65 @@ let empty_odt_entry : odt_entry = struct {
   retired    = false,
 }
 
+// TRAP_QUARANTINE_DESIGN.md: a real, hardware-native mitigation for the
+// repeated-trap DoS class named explicitly (and left unmitigated) by the
+// CHERIoT RTOS paper (Amar et al., ACM SOSP '25, §5.1.2) -- "an attacker
+// [...] repeatedly trigger[ing] traps to force a victim compartment to
+// spend all its cycles micro-rebooting." A small, deliberately simple
+// associative table (linear-scan, matching the real "small fixed table"
+// category this project already uses at this scale, e.g. RTL's own
+// TCM_ODT_ENTRIES=32), keyed by `otype` (the real, already-established
+// compartment-identity field VEDA_OCINVOKE's own cs1.otype==cs2.otype
+// check already treats as authoritative), NOT indexed directly by the
+// full 16-bit otype space -- a handful of live/recently-faulted
+// compartments in this project's own confirmed-single-hart embedded line
+// is the real scale this needs to cover, not tens of thousands of
+// simultaneous entries.
+struct trap_tracker_entry = {
+  valid : bool,
+  otype : bits(16),
+  count : bits(4),
+}
+
+let empty_trap_tracker_entry : trap_tracker_entry = struct {
+  valid = false,
+  otype = zeros(),
+  count = zeros(),
+}
+
+// Real, deliberate simplification for this milestone (TRAP_QUARANTINE_
+// DESIGN.md's own stated scope limit): a fixed threshold, not yet a
+// configurable CSR -- mirrors how veda_attr's own configurability was
+// only added after VEDA_ODT_POPULATE's simpler fixed-descriptor form had
+// already shipped, not invented from day one.
+let TRAP_TRACKER_ENTRIES : int = 8
+let VEDA_TRAP_QUARANTINE_THRESHOLD : bits(4) = 0x3
+
+// LOCAL_FAULT_RECOVERY_DESIGN.md: closes §3.5 of NEXT_STEPS_ROADMAP.md
+// (found on a full re-read of CHERIoT RTOS, not just its own §5.1.2 --
+// CHERIoT's P2 principle gives every compartment its own rights-scoped
+// `compartment_error_handler()`; Veda-Core had no equivalent, so any bug
+// in its own single global trap handler had unbounded blast radius). A
+// small, self-registration-only table, deliberately separate from
+// veda_trap_tracker above despite the identical otype-keyed shape --
+// the two have incompatible lifecycles: quarantine entries are an
+// opportunistic attack-mitigation cache meant to decay/evict; a
+// registered handler must be stable and must never be silently evicted
+// by unrelated trap churn from other compartments.
+struct local_handler_entry = {
+  valid      : bool,
+  otype      : bits(16),
+  entry_addr : bits(32),
+}
+
+let empty_local_handler_entry : local_handler_entry = struct {
+  valid      = false,
+  otype      = zeros(),
+  entry_addr = zeros(),
+}
+
+let LOCAL_HANDLER_TABLE_ENTRIES : int = 8
+
 // Milestone V-B: Veda-Atomic's op-select enum (VEDA_CORE_SPEC.md Section 1)
 // -- moved here, not left in veda_atomic_insts.sail, for the identical
 // real reason vcapidx lives in this `before sys`-ordered module and not

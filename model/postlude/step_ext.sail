@@ -48,6 +48,12 @@ function ext_reset() -> unit = {
   // LOAD/STORE any pre-existing test in this project's own 24-test
   // corpus executes.
   veda_mode = zeros();
+  // LOCAL_FAULT_RECOVERY_DESIGN.md: explicit false, same reasoning as
+  // veda_purecap above -- an unintended reset default of "a redirect is
+  // already pending" would hijack the very first real trap this model
+  // ever takes.
+  veda_local_handler_redirect_pending = false;
+  veda_local_handler_redirect_target = zeros();
 }
 
 // Veda-Core Milestone 14 (rva23-core/veda-core/PCC_COMPARTMENT_DESIGN.md):
@@ -229,5 +235,39 @@ function ext_handle_data_check_error(err : ext_data_addr_error) -> unit = {
 // active here (no CLINT/timer wiring exists in this project's own RTL or
 // Sail work, per this project's own prior research).
 function handle_trap_extension(_p : Privilege, _pc : xlenbits, _ext : option(unit)) -> unit = {
-  if veda_pcc_length != VEDA_PCC_UNBOUNDED then veda_pcc_save_and_reset()
+  // TRAP_QUARANTINE_DESIGN.md: the fault-recording call itself now lives
+  // INSIDE veda_pcc_save_and_reset() (veda_regs.sail), not here -- a real
+  // fix, not the original design: this function is only ONE of three real
+  // call sites that reset a live compartment on a trap (veda_trap(),
+  // ext_handle_fetch_check_error, ext_handle_data_check_error all share
+  // veda_pcc_save_and_reset() as their one true common chokepoint,
+  // confirmed by reading all three directly, not assumed) -- recording
+  // the fault only here would have silently missed the other two, exactly
+  // the failure mode vc_repeated_trap_dos_neg.S caught empirically before
+  // this fix (the fetch-bounds-violation path this test exercises calls
+  // veda_pcc_save_and_reset() directly, never reaching this function).
+  //
+  // LOCAL_FAULT_RECOVERY_DESIGN.md -- real double-call bug found
+  // empirically (a repeated-fault negative test showed the handler's own
+  // body running once when it should have run twice before quarantine
+  // engaged), not assumed correct after writing it: this guard's own
+  // original assumption -- "veda_pcc_length != VEDA_PCC_UNBOUNDED means
+  // trap-time processing has NOT happened yet for this event" -- was
+  // true only because veda_pcc_save_and_reset() unconditionally reset
+  // PCC to unbounded. The local-handler redirect branch added this
+  // session deliberately breaks that: it leaves PCC narrowed (restored
+  // to the SAME live bounds) on purpose. Since trap_handler() (this
+  // function's own caller, sys/sys_control.sail) runs unconditionally
+  // for every trap regardless of source, this function still runs AFTER
+  // ext_handle_fetch_check_error/ext_handle_data_check_error's own
+  // direct call to veda_pcc_save_and_reset() -- and with PCC now
+  // genuinely still narrowed post-redirect, this guard's condition was
+  // wrongly true a second time, double-counting the SAME real fault
+  // against the trap-tracker. Fixed with the one additional real signal
+  // that distinguishes "not yet processed" from "already processed via
+  // a redirect this same event": veda_local_handler_redirect_pending,
+  // set only inside the redirect branch itself and not yet consumed at
+  // this point in the call chain (prepare_trap_vector, which reads and
+  // clears it, has not run yet).
+  if veda_pcc_length != VEDA_PCC_UNBOUNDED & not(veda_local_handler_redirect_pending) then veda_pcc_save_and_reset()
 }

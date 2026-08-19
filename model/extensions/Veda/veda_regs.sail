@@ -28,6 +28,15 @@ register cr15 : capability
 // capability register, rather than folded into the `capability` struct.
 register crTags : bits(16)
 
+// Adversarial RTL-mirror review, 2026-08-19 (TRAP_QUARANTINE_RESULTS.md):
+// write_CSR(0x7C6,...) below calls this, matching every other real
+// ODA-gated write in this project (VEDA_ODT_POPULATE/DESTROY,
+// veda_ocl_insts.sail) -- forward-declared here since veda_regs.sail
+// compiles before veda_ocl_insts.sail (where the real definition lives),
+// the identical cross-file pattern exceptions/sys_exceptions.sail already
+// uses for veda_pcc_restore_on_xret/veda_allows_CSR_access.
+val veda_oda_authorized : unit -> bool
+
 // Milestone 11: the ODA (Object Descriptor Authority) -- Veda-Core's own
 // single Special Capability Register, term-for-term adapted from real
 // CHERI's own SCR model (CHERI ISA spec §4.3.6, Table 4.3). Real CHERI
@@ -105,6 +114,226 @@ register veda_pcc_length : bits(20)
 register veda_mepcc_base : bits(32)
 register veda_mepcc_length : bits(20)
 
+// TRAP_QUARANTINE_DESIGN.md: the live compartment's real IDENTITY, not
+// just its bounds -- companion to veda_pcc_base/veda_pcc_length above,
+// set on every successful VEDA_OCINVOKE/VEDA_OCRETURN alongside them
+// (veda_cap_insts.sail), reset to UNSEALED_OTYPE (the same existing "no
+// compartment" sentinel isSealedCap already uses) everywhere PCC itself
+// resets to unbounded. No saved/mepcc-style shadow is needed: every real
+// trap in this project unconditionally abandons the live compartment
+// (Milestone 21's own universal reset), so nothing ever needs to "resume"
+// with a remembered otype -- only VEDA_OCINVOKE/VEDA_OCRETURN's own fresh
+// entry ever sets this again.
+register veda_pcc_otype : bits(16)
+
+// TRAP_QUARANTINE_DESIGN.md: small, fixed-size, associative (linear-scan)
+// table tracking recent trap frequency per compartment identity (otype).
+register veda_trap_tracker : vector(8, trap_tracker_entry) = vector_init(empty_trap_tracker_entry)
+
+// Real, deliberate implementation shape: every operation here is its own
+// self-contained `foreach` scan-and-mutate (no index value is ever
+// returned FROM a loop and reused outside it) -- Sail's type checker
+// cannot statically re-prove a previously-loop-bound index is still
+// in-range once it has escaped the loop as a plain `option(int)` (tried
+// first; confirmed directly, not assumed, via a real "Could not resolve
+// quantifiers" type error), so every read/write against
+// `veda_trap_tracker` stays inside the same `foreach (i from 0 to 7)`
+// (hardcoded, matching the vector's own literal size -- TRAP_TRACKER_
+// ENTRIES exists only for documentation, not as a type-level bound, for
+// the identical real reason).
+
+function veda_trap_tracker_is_quarantined(otype : bits(16)) -> bool = {
+  var quarantined : bool = false;
+  foreach (i from 0 to 7) {
+    if veda_trap_tracker[i].valid & veda_trap_tracker[i].otype == otype then {
+      quarantined = unsigned(veda_trap_tracker[i].count) >= unsigned(VEDA_TRAP_QUARANTINE_THRESHOLD)
+    }
+  };
+  quarantined
+}
+
+// Called from handle_trap_extension (postlude/step_ext.sail) whenever a
+// trap fires while a real compartment was live. Increments (saturating)
+// that compartment's own fault count, allocating a fresh tracker entry
+// (evicting the lowest-count entry if the small table is already full --
+// a real, deliberate simplification, not a claim of optimal replacement
+// policy) if none exists yet.
+function veda_trap_tracker_record_fault(otype : bits(16)) -> unit = {
+  var found : bool = false;
+  foreach (i from 0 to 7) {
+    if not(found) & veda_trap_tracker[i].valid & veda_trap_tracker[i].otype == otype then {
+      let e = veda_trap_tracker[i];
+      veda_trap_tracker[i] = struct {
+        valid = true, otype = otype,
+        count = if e.count == 0xf then 0xf else e.count + 1,
+      };
+      found = true
+    }
+  };
+  if not(found) then {
+    // Starvation-bypass fix, adversarial RTL-mirror review, 2026-08-19
+    // (TRAP_QUARANTINE_RESULTS.md): the original plain
+    // global-minimum-count eviction let an attacker who controls several
+    // OTHER otypes drive them all to the threshold (count==3, itself
+    // already "quarantined") and force the next fresh fault to evict a
+    // genuinely quarantined victim entry, silently un-quarantining it.
+    // Fix, two independent passes (each self-contained, matching this
+    // file's own established foreach/range(0,7) idiom): prefer a free
+    // slot; else evict the minimum-count entry among only the
+    // NON-quarantined (count < threshold) entries. A quarantined entry
+    // (count >= threshold) is NEVER evicted, full stop -- see the `else`
+    // branch below for the one remaining edge case (every entry already
+    // quarantined) and why it's still safe.
+    var free_victim : range(0, 7) = 0;
+    var free_found : bool = false;
+    foreach (i from 0 to 7) {
+      if not(free_found) & not(veda_trap_tracker[i].valid) then {
+        free_victim = i; free_found = true
+      }
+    };
+    if free_found then {
+      veda_trap_tracker[free_victim] = struct { valid = true, otype = otype, count = 0x1 }
+    } else {
+      var safe_victim : range(0, 7) = 0;
+      var safe_found : bool = false;
+      foreach (i from 0 to 7) {
+        if unsigned(veda_trap_tracker[i].count) < unsigned(VEDA_TRAP_QUARANTINE_THRESHOLD) then {
+          if not(safe_found) then {
+            safe_victim = i; safe_found = true
+          } else if unsigned(veda_trap_tracker[i].count) < unsigned(veda_trap_tracker[safe_victim].count) then {
+            safe_victim = i
+          }
+        }
+      };
+      if safe_found then {
+        veda_trap_tracker[safe_victim] = struct { valid = true, otype = otype, count = 0x1 }
+      }
+      // else: every one of the 8 tracked entries is ALREADY quarantined --
+      // do not evict ANY of them, under any circumstance (re-verified: the
+      // reviewer's own described attack drives every decoy to the SAME
+      // threshold count as the victim, which is exactly this branch, so a
+      // "fall back to plain min-count" exception here would silently
+      // reopen the identical bypass this fix exists to close). This
+      // otype's own fault simply goes untracked for this one instance --
+      // a bounded, self-limiting condition: all 8 already-tracked
+      // compartments are, by construction, already refused re-entry, so
+      // none of them can accumulate further real trap-driven state while
+      // this holds, and 8 simultaneously-quarantined compartments is
+      // itself a loud, monitorable signal. Named as an explicit, accepted
+      // residual limit in TRAP_QUARANTINE_DESIGN.md, not silently dropped.
+    }
+  }
+}
+
+// Called from VEDA_OCINVOKE/VEDA_OCRETURN's own success path, on the
+// PRE-transition otype (the compartment that just made real forward
+// progress, whether by calling further in or returning) -- "good
+// behavior earns forgiveness," the identical real property systemd's
+// StartLimitBurst/Erlang's MaxR provide via a decaying time window, here
+// realized without needing a wall-clock timer this project's own Sail/RTL
+// does not have wired up: reaching this success path at all is only
+// possible if the compartment did NOT fault since its last entry (a fault
+// would have already forced handle_trap_extension's own reset instead).
+function veda_trap_tracker_decay(otype : bits(16)) -> unit = {
+  foreach (i from 0 to 7) {
+    if veda_trap_tracker[i].valid & veda_trap_tracker[i].otype == otype then {
+      veda_trap_tracker[i] = struct { valid = true, otype = otype, count = 0x0 }
+    }
+  }
+}
+
+// Privileged clear (write_CSR(0x7C6,...) below) -- explicit operator
+// recovery, the identical real authorization category (Milestone 11's
+// veda_oda_authorized()) this project's own ODT-Populate/Destroy already
+// use, not a new mechanism.
+function veda_trap_tracker_clear(otype : bits(16)) -> unit = {
+  foreach (i from 0 to 7) {
+    if veda_trap_tracker[i].valid & veda_trap_tracker[i].otype == otype then {
+      veda_trap_tracker[i] = empty_trap_tracker_entry
+    }
+  }
+}
+
+// LOCAL_FAULT_RECOVERY_DESIGN.md: the self-registration-only table
+// backing VEDA_SET_LOCAL_HANDLER (veda_cap_insts.sail) and the trap-time
+// redirect decision in veda_pcc_save_and_reset() below. Deliberately
+// separate from veda_trap_tracker above -- see veda_types.sail's own
+// local_handler_entry comment for why the two lifecycles are
+// incompatible.
+register veda_local_handler_table : vector(8, local_handler_entry) = vector_init(empty_local_handler_entry)
+
+// Hand-off state between veda_pcc_save_and_reset() (decides whether to
+// redirect, deep inside handle_trap_extension's own call chain) and the
+// one real chokepoint that computes the trap's actual jump target
+// (sys/sys_control.sail's trap_handler, a BASE file this design touches
+// for the identical real reason Milestone 27's own mtvec-gate already
+// did: there is no existing extension hook at that specific point, and
+// this is the minimal, precise place a new one is genuinely needed).
+register veda_local_handler_redirect_pending : bool
+register veda_local_handler_redirect_target : xlenbits
+
+function veda_local_handler_registered(otype : bits(16)) -> bool = {
+  var found : bool = false;
+  foreach (i from 0 to 7) {
+    if veda_local_handler_table[i].valid & veda_local_handler_table[i].otype == otype then {
+      found = true
+    }
+  };
+  found
+}
+
+function veda_local_handler_entry_of(otype : bits(16)) -> bits(32) = {
+  var addr : bits(32) = zeros();
+  foreach (i from 0 to 7) {
+    if veda_local_handler_table[i].valid & veda_local_handler_table[i].otype == otype then {
+      addr = veda_local_handler_table[i].entry_addr
+    }
+  };
+  addr
+}
+
+// Self-registration only -- overwrites this otype's own existing entry
+// if present, else allocates a free slot, else fails (returns false --
+// the caller, VEDA_SET_LOCAL_HANDLER, hard-traps on this rather than
+// silently evicting a DIFFERENT compartment's own registered handler; a
+// real, honest scope limit, see LOCAL_FAULT_RECOVERY_DESIGN.md).
+function veda_local_handler_set(otype : bits(16), addr : bits(32)) -> bool = {
+  var found : bool = false;
+  foreach (i from 0 to 7) {
+    if not(found) & veda_local_handler_table[i].valid & veda_local_handler_table[i].otype == otype then {
+      veda_local_handler_table[i] = struct { valid = true, otype = otype, entry_addr = addr };
+      found = true
+    }
+  };
+  if not(found) then {
+    var free_victim : range(0, 7) = 0;
+    var free_found : bool = false;
+    foreach (i from 0 to 7) {
+      if not(free_found) & not(veda_local_handler_table[i].valid) then {
+        free_victim = i; free_found = true
+      }
+    };
+    if free_found then {
+      veda_local_handler_table[free_victim] = struct { valid = true, otype = otype, entry_addr = addr };
+      found = true
+    }
+  };
+  found
+}
+
+// The one consumer of veda_local_handler_redirect_pending/_target --
+// called by sys/sys_control.sail's trap_handler, wrapping its own
+// existing prepare_trap_vector(...) result. Read-and-clear, so a stale
+// pending redirect can never be consumed twice.
+function veda_trap_vector_override(default_target : xlenbits) -> xlenbits = {
+  if veda_local_handler_redirect_pending then {
+    veda_local_handler_redirect_pending = false;
+    veda_local_handler_redirect_target
+  } else {
+    default_target
+  }
+}
+
 // Milestone 14: shared by both real hard-trap paths that narrow PCC
 // away from a live compartment -- `veda_trap()` (every ordinary
 // Veda-Core "use"-family violation) and the new PCC-bounds-violation
@@ -115,10 +344,62 @@ register veda_mepcc_length : bits(20)
 // unconstrained context -- real CHERI's own "Exception Code Capability"
 // requirement (CHERI ISA spec §3.4.7).
 function veda_pcc_save_and_reset() -> unit = {
+  // TRAP_QUARANTINE_DESIGN.md -- real bug, found empirically (a fresh
+  // negative test kept showing count never incrementing), not assumed
+  // correct after writing it: this function, NOT handle_trap_extension
+  // alone, is the one true chokepoint EVERY real trap-while-bounded path
+  // already shares (this file's own pre-existing comment immediately
+  // below already said so -- "veda_trap()... AND the new PCC-bounds
+  // -violation path... routed through handle_exception directly" --
+  // confirmed by reading postlude/step_ext.sail's ext_handle_fetch_check_
+  // error and ext_handle_data_check_error, which both call THIS function
+  // directly, bypassing handle_trap_extension entirely). Recording the
+  // fault here, not only in handle_trap_extension, is what makes the
+  // mechanism cover a real fetch-bounds-violation-induced repeated-trap
+  // loop -- the exact attack vc_repeated_trap_dos_neg.S exercises -- not
+  // just the narrower class of traps that happen to route through the
+  // ordinary per-instruction veda_trap() dispatch.
+  veda_trap_tracker_record_fault(veda_pcc_otype);
   veda_mepcc_base = veda_pcc_base;
   veda_mepcc_length = veda_pcc_length;
-  veda_pcc_base = zeros();
-  veda_pcc_length = VEDA_PCC_UNBOUNDED;
+  // LOCAL_FAULT_RECOVERY_DESIGN.md: if this compartment (a) is not
+  // currently quarantined -- reusing VEDA_TRAP_QUARANTINE's own
+  // authoritative signal so a local handler that itself keeps faulting
+  // loses this privilege after the SAME 3-fault budget every other
+  // repeated-trap actor does, composing with (not bypassing) that
+  // mechanism -- and (b) has a registered local handler, redirect into
+  // that SAME compartment's own just-captured bounds (never widened)
+  // instead of the ordinary global fallback below.
+  // Real bug fix, found by adversarial review (see VEDA_SET_LOCAL_HANDLER's
+  // own registration-side fix and comment for the full explanation):
+  // UNSEALED_OTYPE is a shared sentinel every mret-resumed-without-
+  // OCInvoke or OCReturn-resumed compartment presents identically, not a
+  // genuine per-compartment identity. Registration under this key is now
+  // refused at the source (VEDA_SET_LOCAL_HANDLER), so
+  // veda_local_handler_registered(UNSEALED_OTYPE) should always be false
+  // in practice -- this explicit exclusion is defense-in-depth, not the
+  // only thing preventing the collision, so a future change to the
+  // registration side cannot silently reopen this exact hole here.
+  if not(veda_trap_tracker_is_quarantined(veda_pcc_otype)) & veda_local_handler_registered(veda_pcc_otype) & veda_pcc_otype != UNSEALED_OTYPE then {
+    veda_pcc_base = veda_mepcc_base;
+    veda_pcc_length = veda_mepcc_length;
+    veda_local_handler_redirect_pending = true;
+    veda_local_handler_redirect_target = zero_extend(veda_local_handler_entry_of(veda_pcc_otype));
+    // Real correction found while designing, not assumed correct after
+    // writing it: veda_pcc_otype must NOT reset here -- the handler is
+    // still running as this SAME compartment (same bounds), so a fault
+    // inside the handler itself must still be attributed to its own
+    // otype for the quarantine composition above to mean anything. Only
+    // the ordinary global-fallback path below still clears it.
+  } else {
+    veda_pcc_base = zeros();
+    veda_pcc_length = VEDA_PCC_UNBOUNDED;
+    // No compartment identity survives a trap any more than its bounds
+    // do -- matches veda_pcc_base/_length's own reset immediately above
+    // (no mepcc-style saved otype exists, see veda_pcc_otype's own
+    // declaration comment for why none is needed).
+    veda_pcc_otype = UNSEALED_OTYPE;
+  }
 }
 
 // Automatic restore-on-mret/sret counterpart, matching real CHERI's own
@@ -272,6 +553,8 @@ mapping clause csr_name_map = 0x7C2 <-> "veda_mepcc_base"
 mapping clause csr_name_map = 0x7C3 <-> "veda_mepcc_length"
 mapping clause csr_name_map = 0x7C4 <-> "veda_attr"
 mapping clause csr_name_map = 0x7C5 <-> "veda_mode"
+// TRAP_QUARANTINE_DESIGN.md: next free slot in the same real range.
+mapping clause csr_name_map = 0x7C6 <-> "veda_trap_quarantine_clear"
 
 function clause is_CSR_accessible(0x7C0, _, _) = currentlyEnabled(Ext_Veda)
 function clause is_CSR_accessible(0x7C1, _, _) = currentlyEnabled(Ext_Veda)
@@ -292,6 +575,7 @@ function clause is_CSR_accessible(0x7C3, _, _) = currentlyEnabled(Ext_Veda)
 // rather than an unreachable-but-unproven scattered-function match gap.
 function clause is_CSR_accessible(0x7C4, _, _) = currentlyEnabled(Ext_Veda) & xlen == 64
 function clause is_CSR_accessible(0x7C5, _, _) = currentlyEnabled(Ext_Veda)
+function clause is_CSR_accessible(0x7C6, _, _) = currentlyEnabled(Ext_Veda)
 
 function clause read_CSR(0x7C0) = zero_extend(veda_pcc_base)
 function clause read_CSR(0x7C1) = zero_extend(veda_pcc_length)
@@ -299,6 +583,11 @@ function clause read_CSR(0x7C2) = zero_extend(veda_mepcc_base)
 function clause read_CSR(0x7C3) = zero_extend(veda_mepcc_length)
 function clause read_CSR(0x7C4 if xlen == 64) = zero_extend(veda_attr)
 function clause read_CSR(0x7C5) = zero_extend(veda_mode)
+// TRAP_QUARANTINE_DESIGN.md: a pure action CSR (clear-on-write), nothing
+// persistent to read back -- matches this project's own "read what's
+// really there" principle by reporting zero rather than inventing a
+// fabricated readback value.
+function clause read_CSR(0x7C6) = zeros()
 
 // Milestone 20 (real, empirically-confirmed vulnerability, not
 // theorized): before this pass, all four of these writes were
@@ -381,6 +670,29 @@ function clause write_CSR(0x7C5, value) = {
   else {
     if cur_privilege == Machine then veda_mode = zero_extend(value[0..0]);
     Ok(zero_extend(veda_mode))
+  }
+}
+// TRAP_QUARANTINE_DESIGN.md: privileged, explicit operator recovery --
+// write the otype (low 16 bits) to clear that compartment's own
+// quarantine/count. Gated identically to 0x7C5 above (same real escape
+// vector: code inside a live compartment must not be able to clear its
+// own quarantine out from under this mechanism), plus M-mode, matching
+// veda_mode's own established double-gate precedent. A non-M-mode write
+// is a silent no-op, the identical safe-failure direction 0x7C5 already
+// established for its own privilege gate.
+function clause write_CSR(0x7C6, value) = {
+  if veda_pcc_length != VEDA_PCC_UNBOUNDED then { veda_pcc_save_and_reset(); Err(()) }
+  else {
+    // Adversarial RTL-mirror review, 2026-08-19: this gate previously
+    // checked `cur_privilege == Machine` only, contradicting this file's
+    // own comment above (and the design doc) which said it should match
+    // ODT-Populate/Destroy's real `Machine | veda_oda_authorized()`
+    // pattern -- confirmed a real omission, not a deliberate narrower
+    // choice, by grepping every other ODA-gated write in the project.
+    // RTL's own mirror was already built correctly against the documented
+    // intent; this fixes Sail to match it, not the other way around.
+    if cur_privilege == Machine | veda_oda_authorized() then veda_trap_tracker_clear(value[15..0]);
+    Ok(zero_extend(value[15..0]))
   }
 }
 
