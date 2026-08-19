@@ -456,6 +456,16 @@ private function check_misc_extension_dependencies() -> bool = {
     valid = false;
     print_endline("The Zcf extension is enabled: Zcf is not supported on RV64.");
   };
+  // R70: the mirror of the Zcf arm above, and for the same reason -- a 56-bit
+  // Base / 44-bit Object_ID design is semantically RV64-scale, so an RV32
+  // configuration claiming Veda support has asked for something incoherent.
+  // currentlyEnabled(Ext_Veda) already refuses it structurally; this makes the
+  // MISCONFIGURATION VISIBLE rather than silently producing a Veda-less core,
+  // which is R14's rule applied one layer up.
+  if (config extensions.Veda.supported : bool) & xlen == 32 then {
+    valid = false;
+    print_endline("The Veda extension is enabled: Ext_Veda is RV64-only (DESIGN_01 decision 7).");
+  };
   if (config extensions.F.supported : bool) & (config extensions.Zfinx.supported : bool) then {
     valid = false;
     print_endline("The F and Zfinx extensions are mutually exclusive and cannot be supported simultaneously.");

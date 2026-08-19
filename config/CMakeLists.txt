@@ -10,6 +10,9 @@ foreach(CONFIG__BASE__XLEN IN ITEMS 32 64)
             set(config_filename "rv${CONFIG__BASE__XLEN}d_v${vlen}_e${elen}.json")
 
             set(CONFIG_XLEN_IS_32 "false")
+            # R70: Ext_Veda is RV64-only (DESIGN_01 decision 7). The config
+            # declares that rather than claiming support the model then refuses.
+            set(CONFIG_XLEN_IS_64 "true")
             set(CONFIG_XLEN_IS_64 "false")
             set(CONFIG_XLEN_IS_${CONFIG__BASE__XLEN} "true")
 
@@ -34,6 +37,7 @@ foreach(CONFIG__BASE__XLEN IN ITEMS 32 64)
             endif()
 
             if(CONFIG_XLEN_IS_32 STREQUAL true)
+                set(CONFIG_XLEN_IS_64 "false")
                 set(CONFIG__PHYSADDR__BITS 34)
             elseif(CONFIG_XLEN_IS_64 STREQUAL true)
                 set(CONFIG__PHYSADDR__BITS 56)

@@ -14,7 +14,32 @@
 enum clause extension = Ext_Veda
 mapping clause extensionName = Ext_Veda <-> "veda"
 function clause hartSupports(Ext_Veda) = config extensions.Veda.supported
-function clause currentlyEnabled(Ext_Veda) = hartSupports(Ext_Veda)
+// ═══ R70 -- DESIGN_01 DECISION 7, RECORDED AND NEVER BUILT ═══
+//
+// DESIGN_01 decision 7 says outright: "Gate `Ext_Veda` on `xlen == 64` ... This
+// is a PREREQUISITE THAT LANDS BEFORE ANY WIDTH EDIT." The width edit landed;
+// the gate did not. Six comments in this extension cite that decision as settled
+// fact, three of them adding "but that gate is invisible to the type checker
+// here" -- which is the tell: the author knew it was not structural and assumed
+// it existed elsewhere.
+//
+// MEASURED before the fix: `sail_riscv_sim --rv32 --validate-config` reported
+// "The default configuration is valid", and of 28 `mapping clause encdec =
+// VEDA_*` clauses only 12 carried `xlen == 64`. So an RV32 build ran an
+// incoherent HALF-EXTENSION nobody specified -- the capability query, derivation
+// and sealing family, the three crossings, Destroy, OCLEAR and veda.bind decoded,
+// while OCL/OCS, the ODT write path, the paging pair and the atomics did not.
+//
+// NOT a capability escape -- every bounds and permission check lives on the
+// dereference path, and that is exactly the half that did not decode. It is a
+// FAIL-OPEN CONFIGURATION GATE, and the honest severity is stated rather than
+// inflated.
+//
+// One line closes all twenty-eight, because every one of them guards on
+// currentlyEnabled(Ext_Veda) -- verified by counting before landing. The twelve
+// that also carry `xlen == 64` become redundant rather than wrong, and are left
+// alone: they document the same fact at the site that needs it.
+function clause currentlyEnabled(Ext_Veda) = hartSupports(Ext_Veda) & (xlen == 64)
 
 // R24 (open half) -- TEST FIXTURES ARE NOT ARCHITECTURE.
 //

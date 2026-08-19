@@ -550,7 +550,8 @@
       "supported": true
     },
     "Veda": {
-      "supported": true,
+      "//R70": "Ext_Veda is RV64-only -- DESIGN_01 decision 7, which said the gate was a prerequisite that lands before any width edit. The width edit landed and the gate did not, so an RV32 build ran an incoherent half-extension: 12 of 28 encdec clauses carried xlen == 64 and 16 did not. The structural gate is in currentlyEnabled(Ext_Veda); this key stops the configuration CLAIMING support the model would then have to refuse.",
+      "supported": @CONFIG_XLEN_IS_64@,
       "//test_fixtures": "R24 open half: the capability-register TEST FIXTURES, off by default. They are scaffolding for states the ISA deliberately cannot construct, not architecture, and reset must not hand a program four tagged capabilities as a normative claim. The layer-parallel twin on the RTL side is the +veda_fixtures plusarg. Sail config keys are all REQUIRED with no default mechanism, so this has to be declared here as well as in the run configs -- which is itself the honest cost of the switch and is recorded rather than hidden.",
       "test_fixtures": false
     },
