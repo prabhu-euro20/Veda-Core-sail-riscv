@@ -137,6 +137,35 @@ let VEDA_CAUSE_DOMAIN_VIOLATION : bits(5) = 0b01011 // 0x0B
 // into a performance feature. Same argument that gave residency its own cause.
 let VEDA_CAUSE_COW_FAULT : bits(5) = 0b01100 // 0x0C
 
+// R84 DECISION 2 -- A CAPABILITY MAY NOT ADDRESS A DEVICE.
+//
+// R84 routed OCL.D/OCS.D through the checked memory path so that a capability
+// can finally reach the CLINT, the signature region and HTIF -- without which a
+// purecap machine has no console, no timer and no way to say it finished.
+//
+// The CAPABILITY family cannot follow it there, and the reason is in the
+// upstream signature: `mmio_write` takes no `meta`. Routing OCL.C/OCS.C through
+// it unchanged would mean a capability stored to a device SILENTLY LOSES ITS
+// TAG -- it would look stored and be dead on the next load.
+//
+// A SILENT DOWNGRADE IS THE SHAPE THIS REGISTER HAS NOW REFUSED FIVE TIMES:
+// R38's attenuation (CAndPerm could clear it), R72's entitlement (it travelled
+// through memory), R77's identity (csrw could switch its enforcement off),
+// R81's window (it bounded creation and not binding), and this. A rule that
+// degrades quietly instead of refusing loudly is advisory, not enforced.
+//
+// So the refusal is LOUD and it has its OWN cause. A device register genuinely
+// cannot hold a capability, so this states the truth rather than imposing a
+// limit -- and it must be a RULE WITH A TEST, not an accident of an upstream
+// function's argument list.
+//
+// 0x0D is the next free code after RESIDENCY 0x0A, DOMAIN 0x0B and COW 0x0C.
+// It is deliberately NOT the standard access fault that R84's DECISION 1 uses
+// for a device-side ERROR: that answers "it did not work", and this answers
+// "you were not permitted", which is the distinction R64 built a separate fault
+// channel to preserve.
+let VEDA_CAUSE_DEVICE_VIOLATION : bits(5) = 0b01101 // 0x0D
+
 function veda_xtval(cap_idx : bits(4), cause : bits(5)) -> xlenbits = {
   // Deliberately avoids the two-argument `zero_extend(bits, width)` form --
   // verified this does not exist as a general builtin in the real Sail

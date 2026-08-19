@@ -388,6 +388,13 @@ function clause execute VEDA_OCL_C(rs2, rs1, rd) = {
       // read_meta = true (unlike OCL.D/OCS.D's `false` above): this is the
       // one real access kind in this file that actually needs the
       // memory-resident Tag, not just the 256 data bits.
+      // R84 DECISION 2: a capability may not be loaded FROM a device. Checked
+      // after the authority chain, deliberately -- an unauthorised access to a
+      // device must still report the AUTHORITY failure, not this one. R19's
+      // ordering rule, applied to a new arm.
+      if within_mmio_readable(paddr, 32) then
+        veda_trap(vcapno_to_vcapidx(capidx), VEDA_CAUSE_DEVICE_VIOLATION)
+      else {
       let (data, tag) : (bits(256), mem_meta) = read_ram(Read_plain, paddr, 32, true);
       let loaded_cap = veda_cap_unpack(data);
       C(rd) = loaded_cap;
@@ -401,6 +408,7 @@ function clause execute VEDA_OCL_C(rs2, rs1, rd) = {
       // property, not assumed true just because the load succeeded.
       CTag(rd) = tag;
       RETIRE_SUCCESS
+      }
     },
   }
 }
@@ -429,8 +437,15 @@ function clause execute VEDA_OCS_C(rs2, rs1, rd) = {
       // behavior: storing an invalid capability is legal, it just can't
       // be loaded back as valid), but the tag store correctly records
       // "not a real capability" for those bytes.
+      // R84 DECISION 2: a capability may not be stored INTO a device -- see
+      // VEDA_CAUSE_DEVICE_VIOLATION in veda_bind_insts.sail for why this refuses
+      // loudly instead of letting mmio_write drop the tag.
+      if within_mmio_writable(paddr, 32) then
+        veda_trap(vcapno_to_vcapidx(capidx), VEDA_CAUSE_DEVICE_VIOLATION)
+      else {
       let _ = write_ram(Write_plain, paddr, 32, packed, store_tag);
       RETIRE_SUCCESS
+      }
     },
   }
 }
