@@ -364,7 +364,7 @@ function clause execute VEDA_BINDINST(mode_bits, rs1, rd) = {
   // Each mode keeps its OWN established soft-fail shape: Bind-NoTrap zeroes the
   // register and clears Tag; Rebind clears Tag ONLY, preserving every field
   // including Offset (VEDA_CORE_SPEC.md Section 4, and RTL-4's own note).
-  if not(veda_bind_domain_ok(e.owner_domain)) then match mode {
+  if not(veda_bind_domain_ok(e)) then match mode {
     VEDA_BIND          => veda_trap_obj(rd, VEDA_CAUSE_DOMAIN_VIOLATION, object_id),
     VEDA_BIND_NOTRAP   => { wC(rdno, zero_capability); wCTag(rdno, false); RETIRE_SUCCESS },
     VEDA_REBIND        => { wCTag(rdno, false); RETIRE_SUCCESS },

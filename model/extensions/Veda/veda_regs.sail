@@ -228,6 +228,8 @@ register veda_trap_poison : bool
 // the predicate stays with the finding that shaped it -- the same pattern this
 // file already uses five times immediately below.
 val veda_oda_authorized : unit -> bool
+// R81. Same reason, same file, same block.
+val veda_oda_covers : (bits(56), bits(40)) -> bool
 
 val veda_trap_level_has_context : unit -> bool
 val veda_trap_frame_abandon : unit -> unit
@@ -1219,11 +1221,42 @@ function veda_bind_perms(e : odt_entry) -> bits(16) =
 // here -- it is what arm 2 already granted to everybody -- but removing everyone
 // else from this arm is what makes it VISIBLE, and it is recorded as its own
 // finding rather than folded in silently.
-function veda_bind_domain_ok(owner_domain : bits(20)) -> bool =
-  if owner_domain == VEDA_DOMAIN_ANY then true
-  else if veda_pcc_object == VEDA_OBJECT_NONE
-          & (cur_privilege == Machine | veda_oda_authorized()) then true
-  else owner_domain == veda_pcc_object[43 .. 24]
+// R81 -- AN AUTHORITY'S SCOPE BOUNDS WHAT IT AUTHORISES, AND NOTHING ELSE.
+// The ambient arm is split in two, because the two principals standing in it are
+// bounded by different things:
+//   MACHINE is bounded by nothing, and scoping it would be theatre -- R47 said so
+//     in as many words and this keeps that decision intact.
+//   AN ODA HOLDER is bounded by its own window, and until now it was not. R47
+//     adopted "on the DELEGATED path only, the memory a descriptor names must lie
+//     inside the ODA's own window" and applied it to the seven ODT-management
+//     instructions. veda.bind is the EIGHTH consumer of that authority and read no
+//     ODA field at all.
+// MEASURED before it was designed (poc_r81_oda_bind_outside_window.S): an ODA
+// holder at User whose window covers `win` bound an object at `out`, entirely
+// outside it, read 0xC0FFEE through it, and TOOK NO TRAP. Its own in-window bind
+// (the anti-vacuity control) also succeeded, so binding was not merely broken.
+//
+// THE ARM STRUCTURE IS THE STATEMENT. Arm 1 (ANY) needs no window: the owner
+// DECLARED the object public, and a declaration is not the ODA's to bound. Arm 4
+// (domain match) needs none either: a compartment's own identity authorised that
+// bind, not its ODA. Only the arm the ODA itself grants is scoped by the ODA.
+//
+// COSTS NOTHING NEW, verified at source rather than assumed -- the check that
+// refuted R50's GPR-mask ABI. The bind path ALREADY holds the entry (it reads
+// owner_domain, Base, Length, Perms and generation to mint from), so
+// veda_oda_covers(e.Base, e.Length) needs no second lookup, and the RTL's
+// $veda_oda_denies_old is already computed from $veda_odt_base/$veda_odt_length
+// (veda_core.tlv:4676-4677), the very signals the bind gate stands next to.
+//
+// ALL THREE BIND MODES ARE COVERED BY CONSTRUCTION: R73 routes BIND, BIND_NOTRAP
+// and REBIND through this single gate at veda_bind_insts.sail:367, which is its
+// ONLY caller. No R68 shape here -- verified by grep, not by inspection.
+function veda_bind_domain_ok(e : odt_entry) -> bool =
+  if e.owner_domain == VEDA_DOMAIN_ANY then true
+  else if veda_pcc_object == VEDA_OBJECT_NONE & cur_privilege == Machine then true
+  else if veda_pcc_object == VEDA_OBJECT_NONE & veda_oda_authorized()
+       then veda_oda_covers(e.Base, e.Length)
+  else e.owner_domain == veda_pcc_object[43 .. 24]
 
 function veda_trap_level_has_context() -> bool =
   veda_pcc_length != VEDA_PCC_UNBOUNDED | veda_current_region != zeros() | veda_pcc_object != VEDA_OBJECT_NONE
