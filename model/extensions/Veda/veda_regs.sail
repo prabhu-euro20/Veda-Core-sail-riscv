@@ -223,6 +223,12 @@ register veda_trap_poison : bool
 // Sail requires declaration before use. The type checker caught this
 // directly; it is the kind of ordering error TL-Verilog accepts silently,
 // which is why the Sail layer is written first.
+// R79. Defined in veda_ocl_insts.sail beside R47's window commentary, which
+// Sail processes AFTER this file. Forward-declared here rather than moved, so
+// the predicate stays with the finding that shaped it -- the same pattern this
+// file already uses five times immediately below.
+val veda_oda_authorized : unit -> bool
+
 val veda_trap_level_has_context : unit -> bool
 val veda_trap_frame_abandon : unit -> unit
 val veda_crbr_save_and_reset : unit -> unit
@@ -1162,9 +1168,61 @@ function veda_trap_frame_abandon() -> unit = {
 function veda_bind_perms(e : odt_entry) -> bits(16) =
   if e.cow then e.Perms & 0xFFF7 else e.Perms
 
+// R79 -- AMBIENT ROOT IS AVAILABLE ONLY TO A PRINCIPAL THAT IS BOTH NAMELESS
+// AND IN MACHINE MODE. That is boot, and nothing else.
+//
+// Arm 2 existed for boot: at reset veda_pcc_object is the sentinel, and boot
+// must be able to bind the objects it creates. But the sentinel is reachable in
+// THREE states, not one, and the enumeration is closed because veda_pcc_object
+// has exactly four writers (step_ext.sail:54 reset, :361 trap entry, :443 xret
+// restore, veda_cap_insts.sail:625/:924 the two crossings) and only the
+// crossings install a name:
+//
+//   boot                                Machine   INTENDED (R34 accepted it)
+//   a trap handler                      Machine   R77, and NOT closed by this
+//   User code entered by a privilege     User     THIS, and it was the worst of
+//     drop, having crossed nothing                the three
+//
+// The third row is not trusted code. It is the ordinary shape of an operating
+// system: a kernel writes mstatus.MPP = User and mrets into a process. That
+// process never crossed a compartment boundary, so its identity is still the
+// reset sentinel -- veda_pcc_restore_on_xret's whole body sits inside
+// `if veda_trap_depth != zeros()` and a boot-time drop happens at depth 0 -- and
+// veda.bind has no privilege gate of its own anywhere in veda_bind_insts.sail.
+// So it held the ambient root and could bind any object in the machine by name,
+// having been delegated nothing. R52, R59, R73, R75 and R76 all bypassed at once.
+//
+// WHY ONE CONJUNCT IS ENOUGH HERE AND WAS NOT ENOUGH FOR R77. Refused, a
+// nameless User principal falls to arm 3 and compares against
+// VEDA_OBJECT_NONE[43..24] = 0xFFFFF = VEDA_DOMAIN_ANY, so it binds exactly what
+// is DECLARED public and nothing else. It cannot escalate the way R77's handler
+// could, because that route runs through Populate, and
+//     veda_oda_denies(base, len) = (cur_privilege != Machine) & not(veda_oda_covers(base, len))
+// is ALWAYS FALSE at Machine and window-checked at User. Machine mode IS the
+// unbounded creation authority; the ODA is its bounded counterpart. That is
+// exactly why R77 is blocked on bounding Populate and this is not.
+//
+// THE ODA ARM IS NOT DECORATION, AND THE CORPUS PROVED IT. The first draft of
+// this fix required Machine alone. It broke vc_r47_oda_scope_neg's own CONTROL,
+// whose comment calls itself "the over-refusal guard, and it is the load-bearing
+// one": an ODA holder at User mints object 42 INSIDE its window, legitimately,
+// and must then be able to BIND it. Under Machine-alone it could not, because
+// veda_creating_domain keys on the PCC NAME -- which an ODA does not set -- so
+// the object was stamped VEDA_DOMAIN_BOOT and its own creator could not name it.
+// A delegated authority that can create what it cannot use is not a delegation.
+//
+// RESIDUE, STATED NOT HIDDEN (R81): this arm gives an ODA holder AMBIENT bind,
+// which is broader than the ODA's own window. R47 made the window load-bearing
+// on the seven ODT instructions; veda.bind is not among them and reads no ODA
+// field at all -- `grep -c oda veda_bind_insts.sail` returns 0. So an ODA holder
+// can still bind objects whose memory lies outside its window. That is not new
+// here -- it is what arm 2 already granted to everybody -- but removing everyone
+// else from this arm is what makes it VISIBLE, and it is recorded as its own
+// finding rather than folded in silently.
 function veda_bind_domain_ok(owner_domain : bits(20)) -> bool =
   if owner_domain == VEDA_DOMAIN_ANY then true
-  else if veda_pcc_object == VEDA_OBJECT_NONE then true
+  else if veda_pcc_object == VEDA_OBJECT_NONE
+          & (cur_privilege == Machine | veda_oda_authorized()) then true
   else owner_domain == veda_pcc_object[43 .. 24]
 
 function veda_trap_level_has_context() -> bool =
