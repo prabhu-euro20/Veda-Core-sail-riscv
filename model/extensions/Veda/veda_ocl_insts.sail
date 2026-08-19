@@ -1469,8 +1469,52 @@ mapping clause encdec = VEDA_ODT_PAGE_IN(rs2, rs1, rd)
 // real machine can produce -- but paging THAT object in would revalidate
 // that capability at a new Base. No test may do it, and a seeded
 // non-resident object is not a legitimate page-in input.
+// ═══ R69 -- PAGE-IN IS MACHINE-ONLY, AND THE ODA TESTS ARE DELETED ═══
+//
+// THE RULE, applied uniformly rather than site by site: a delegated actor may
+// write an ODT entry only while the object still occupies memory that actor
+// demonstrably holds. An object that is NOT RESIDENT occupies nothing, so no
+// delegated actor may write its entry. Machine is exempt because it is never
+// window-tested at all.
+//
+// AT THIS INSTRUCTION THE RULE COLLAPSES TO MACHINE-ONLY, and that is a
+// consequence rather than a special case: the gate below already refuses
+// `not(valid) | resident`, so EVERY delegated execution of page-in is a
+// non-resident one. There is no delegated case left to authorize.
+//
+// WHY NO SUBSTITUTE PREDICATE CAN WORK. Page-out is the sole producer of
+// {valid, not resident}, and its own gate refuses a non-resident entry -- so its
+// window test always ran against a LIVE Base, and the Base it then preserves is
+// THE RECORD OF THE EVICTION AUTHORITY. Page-in's first ODA conjunct was
+// therefore not merely "a test against a dead value" (R65's framing) but an
+// EVICTOR TEST IMPLEMENTED BY PROXY THROUGH AN ADDRESS: right in shape, unsound
+// in mechanism, because the proxy decays the instant the frame becomes
+// reallocatable -- which is the instant the eviction completes.
+//
+// And the legitimate delegated pager and the R68-standing attacker present
+// IDENTICAL EVIDENCE: both hold the freed frame and a destination frame. The one
+// differentiating fact is WHO EVICTED, and page-out records nothing about it --
+// its write changes exactly `generation` and `resident`. They are not hard to
+// tell apart; they are INDISTINGUISHABLE given the state this machine keeps.
+//
+// "You may repair what you evicted" is the right rule and it does not fit:
+// ODT_ENTRY_BYTES is 32 with offsets running 0..29, so 16 spare bits -- not the
+// 20 a domain needs nor the 44 an Object_ID needs -- and the stride is baked into
+// 107 hard-coded seed offsets across 11 entry bases. Fail closed instead.
+//
+// THE LOCKOUT COSTS NOTHING CONSTRUCTIBLE, measured rather than assumed. A
+// delegated pager cannot learn which object faulted: the residency trap does
+// stage the name (veda_trap_obj), but CSR 0x7C9 is Machine-only BY ITS ADDRESS
+// -- csrPriv(csr) = csr[9..8], and 0x7C9 gives 0b11 -- and mtval carries only
+// {cap_idx, cause}. So delegated demand paging was never constructible here, and
+// not because page-in refused it.
+//
+// veda_stale_authority would have been the WRONG term: it requires `e.valid`, so
+// pasting it would leave an invalid entry uncovered if the gate below were ever
+// relaxed -- and Destroy preserves Base and Length on an invalidated slot, which
+// is exactly that entry. The unconditional privilege refusal depends on nothing.
 function clause execute VEDA_ODT_PAGE_IN(rs2, rs1, rd) = {
-  if not(cur_privilege == Machine | veda_oda_authorized()) then Illegal_Instruction()
+  if cur_privilege != Machine then Illegal_Instruction()
   else {
     let object_id_gpr64 : bits(64) = zero_extend(X(rs1));
     let object_id : bits(44) = object_id_gpr64[43..0];
@@ -1482,9 +1526,10 @@ function clause execute VEDA_ODT_PAGE_IN(rs2, rs1, rd) = {
     // delegated actor could page a foreign object into its own window and own
     // it outright. The old Base survives page-out (preserved, stale but
     // present), so the old half is a real test rather than a read of zeros.
-    if veda_oda_denies(old_entry.Base, old_entry.Length)
-       | veda_oda_denies(base, old_entry.Length) then Illegal_Instruction()
-    else
+    // R69: both veda_oda_denies conjuncts DELETED rather than left standing.
+    // Machine is exempt from them and no delegated caller reaches here, so they
+    // would read as tests that cannot fail -- the expired-justification defect
+    // this register keeps paying for.
     // R63: the region named must be a region that EXISTS -- and it must be a
     // REFUSAL, not the silent no-op a gated odt_write would be.
     if not(veda_region_nameable(object_id)) | not(old_entry.valid) | old_entry.resident then Illegal_Instruction()
