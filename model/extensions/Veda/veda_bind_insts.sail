@@ -347,7 +347,40 @@ function clause execute VEDA_BINDINST(mode_bits, rs1, rd) = {
       // owner mismatch included -- it joins the object-not-found and
       // already-sealed cases in the same uniform soft-fail branch below.
       let cur = C(rdno);
-      if isSealedCap(cur) then {
+      // ═══ R43 -- "ALREADY-BOUND" WAS A PRECONDITION NOBODY ENFORCED ═══
+      //
+      // Section 4 defines Rebind as refreshing "an ALREADY-BOUND capability
+      // register's" fields from the ODT, leaving Offset unchanged. Neither half
+      // was enforced: CTag(rdno) was never checked, so an untagged register
+      // worked; and cur.Object_ID was never compared against the Object_ID in
+      // the GPR, so Rebind would carry an Offset meaningful in object A onto
+      // object B. That is incoherent with the instruction's own stated purpose.
+      //
+      // NOT an escalation as it stood -- Rebind re-derives Perms from the entry
+      // and sits behind the same veda_bind_domain_ok gate as Bind, so it granted
+      // no more than a plain Bind of the same name. It becomes one the moment
+      // anybody makes Rebind preserve the HOLDER'S Perms, which is exactly the
+      // R38(b) closure that was refuted: hold a full-permission capability to A,
+      // Rebind against B, keep A's permissions on B's bounds.
+      //
+      // DECIDED: narrow the instruction rather than amend the specification.
+      // Leaving the two disagreeing is the class R40 closed in the cause table,
+      // and amending Section 4 would permanently foreclose Perms-from-register
+      // while leaving that landmine armed for whoever tries it next.
+      //
+      // SOFT-FAIL, NOT A TRAP, deliberately: the comment directly above records
+      // that Rebind never traps for ANY failure reason, so a refusal that
+      // trapped would change the instruction's contract far beyond this finding.
+      // Tag first, because isSealedCap on an untagged register reads an otype
+      // that means nothing -- and the observable outcome is identical either
+      // way, since both arms clear the tag and retire.
+      if not(CTag(rdno)) then {
+        wCTag(rdno, false);
+        RETIRE_SUCCESS
+      } else if cur.Object_ID != object_id then {
+        wCTag(rdno, false);
+        RETIRE_SUCCESS
+      } else if isSealedCap(cur) then {
         wCTag(rdno, false);
         RETIRE_SUCCESS
       } else if e.valid & owner_ok then {
