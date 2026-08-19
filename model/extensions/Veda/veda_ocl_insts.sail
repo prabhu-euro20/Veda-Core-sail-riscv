@@ -712,8 +712,20 @@ function veda_oda_denies(base : bits(56), length : bits(40)) -> bool =
 // compartment's RETURN PATH is by construction in another domain. Here the boot
 // context's objects -- which is where return paths and type authorities are
 // built -- stay VEDA_DOMAIN_ANY and remain bindable from anywhere.
+// R75/R76 -- THE AMBIENT ARM RETURNED VEDA_DOMAIN_ANY, AND THAT ONE VALUE IS
+// WHAT EVERY MEASURED ESCALATION CONSUMED. R75 binds A's CODE object by name,
+// R75b binds the TYPE AUTHORITY by name, R76 re-stamps. All three eat the same
+// value, and it is written HERE, at the Populate, not at a crossing -- which is
+// why all four crossing-side designs were refuted. The crossing is where
+// authority is SPENT; this is where it is GRANTED.
+//
+// R17-SAFE BY CONSTRUCTION. R17 was retracted for FORBIDDING cross-domain Bind,
+// which made compartments one-way. This forbids nothing: it requires that
+// sharing be DECLARED, one set.domain per object, which is what a loader does
+// at load time anyway. CHERI's reset root and CHERIoT's loader splitting root
+// authority into software roots are the same shape.
 function veda_creating_domain() -> bits(20) =
-  if veda_pcc_object == VEDA_OBJECT_NONE then VEDA_DOMAIN_ANY
+  if veda_pcc_object == VEDA_OBJECT_NONE then VEDA_DOMAIN_BOOT
   else (veda_pcc_object)[43 .. 24]
 
 function clause execute VEDA_ODT_POPULATE(rs2, rs1, rd) = {
@@ -1278,6 +1290,31 @@ function clause execute VEDA_ODT_SET_DOMAIN(rs2, rs1, rd) = {
     // veda_domain_nameable for why this must be a WRITE-time refusal: a
     // read-time check would simply make the stamp arrive on schedule.
     if not(veda_domain_nameable(new_domain)) then Illegal_Instruction()
+    else
+    // ═══ R76 -- THE OWNERSHIP QUESTION THIS CLAUSE NEVER ASKED ═══
+    //
+    // Every guard above asks whether the ACTION is well-formed -- is the object
+    // real, is the principal real, is the ODA window over this memory, is the
+    // Base still live. NOT ONE asks whether the actor OWNS what it re-stamps.
+    // Measured before the fix, both layers: a region-1 compartment refused an
+    // object narrowed to domain 0 executed `set.domain <it> <- 1` at Machine
+    // with ZERO traps, and the identical bind then succeeded and read the
+    // secret. R75 forges an identity to satisfy the bind gate; this rewrote the
+    // gate's own input.
+    //
+    // R47's window does not cover it, and its own comment says why: a policy
+    // write "needs authority over the MEMORY that descriptor names". That is
+    // memory, not policy -- and R45 recorded that two Object_IDs may name the
+    // same memory, so an ODA delegate could re-stamp objects belonging to other
+    // domains that merely live inside its window.
+    //
+    // THE RULE: you may re-stamp only what you already own. Ambient is the one
+    // exempt principal, because somebody must perform the initial delegation --
+    // CHERI's reset root, CHERIoT's loader. An object still carrying
+    // VEDA_DOMAIN_ANY or VEDA_DOMAIN_BOOT is re-stampable only from ambient,
+    // because neither sentinel equals any real region.
+    if not(veda_pcc_object == VEDA_OBJECT_NONE
+           | old_entry.owner_domain == (veda_pcc_object)[43 .. 24]) then Illegal_Instruction()
     else {
       odt_write(object_id, struct {
         // EVERYTHING except owner_domain is copied verbatim. In particular the

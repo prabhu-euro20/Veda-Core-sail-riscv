@@ -320,6 +320,14 @@ let VEDA_OWNER_UNOWNED : bits(8) = 0xFF
 // files in order and this one comes first, so a constant used by this struct
 // has to live with the struct.
 let VEDA_DOMAIN_ANY : bits(20) = 0xFFFFF
+// R75/R76 -- THE AMBIENT CREATION DOMAIN. VERIFIED FREE BEFORE USE: 0xFFFFE
+// appears nowhere as a domain on either layer, with 0xFFFFF as the control
+// proving the grep finds real hits. Deliberately NOT a real region:
+// veda_bind_domain_ok's third arm compares owner_domain against
+// veda_pcc_object[43..24], and no region holds 0xFFFFE, so a BOOT-owned object
+// is bindable ONLY from ambient -- which is arm 2 of that same function.
+// THE BIND GATE NEEDS NO EDIT AT ALL.
+let VEDA_DOMAIN_BOOT : bits(20) = 0xFFFFE
 
 struct odt_entry = {
   valid      : bool,
